@@ -117,7 +117,39 @@ session) instead of the HID tap, or injecting through the RFB channel — not im
 
 ---
 
-## 6. Verified on this machine (2026-05-30)
+## 5b. TCC permissions need a one-time FOREGROUND grant
+
+The session-safe lanes still require macOS privacy grants the first time:
+- **Screen Recording** → for `/frame.jpg` capture of B
+- **Accessibility** → for pyautogui (foreground only)
+- **Automation** → for `osascript` to control each app (Notes, Safari, …)
+
+**Critical gotcha:** TCC **consent dialogs can only be shown by the foreground console
+session.** While B is backgrounded (you're in A, viewing via VNC), `tccd` cannot present
+the prompt, so the call just fails — e.g. `osascript` returns `-1743 Not authorized to
+send Apple events`, with **no prompt**, and `tccutil reset` doesn't help.
+
+**Grant procedure (one-time, per app for Automation):**
+1. Fast-user-switch **into** the agent user (foreground).
+2. Trigger the action once (e.g. run the `osascript` one-liner in its Terminal) → approve
+   the prompt that now appears.
+3. Switch back. The grant **persists** and works while backgrounded thereafter.
+
+So replicating this needs a brief foreground setup pass to grant all required TCC perms;
+after that the agent runs fully backgrounded.
+
+## 6. The session-safe action toolkit (proven end-to-end)
+
+| Action | Mechanism | Hijack-safe? |
+| :--- | :--- | :--- |
+| Launch app | `open_app` → `open -a` | ✅ runs in B's session |
+| In-app automation | `run_applescript` → `osascript` | ✅ Apple Events to B's apps (needs Automation TCC) |
+| Web | Chrome CDP (`extract`/scrape) | ✅ DOM, no OS input |
+| Gmail / Docs / Sheets / Calendar | MCP | ✅ API |
+| View B from A | VNC (SSH tunnel) | ✅ read-only view + manual takeover |
+| Pixel click/type | pyautogui | ⚠️ HID tap → foreground; **fail-closed**, foreground-only |
+
+## 7. Verified on this machine (2026-05-30)
 
 - ✅ SSH tunnel `5901→5900`, `open vnc://localhost:5901`, **"Log in as clone"** → clone's
   desktop visible in a window while staying in Profile A.
