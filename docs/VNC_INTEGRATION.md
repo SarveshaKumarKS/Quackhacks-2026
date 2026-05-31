@@ -67,51 +67,48 @@ terminal, which is equivalent for testing.
 
 ---
 
-## 4. The failsafe finding (the crux)
+## 4. ⚠️ The crux: pixel input hijacks the foreground — DO NOT bypass the failsafe
 
-With clone's VNC virtual session active, the agent-server still reports:
-```
-active_console: false
-```
-because the **physical** console is still Profile A. So `is_profile_b_active_console()` —
-which gates both `computer_use` and screen capture — keeps **blocking the agent**, even
-though B is now fully visible and controllable.
+With clone's VNC session active, the agent-server still reports `active_console: false`
+(the **physical** console is Profile A). We briefly added a `VNC_SUPERVISED_MODE` flag to
+let `computer_use` run anyway, assuming "the agent runs in B's session, so it acts on B."
 
-**That gate is wrong for VNC mode.** Its original justification was:
-1. backgrounded ⇒ not rendered (nothing to see/act on), and
-2. acting could hijack the user's foreground (Profile A).
+**That assumption is WRONG, and it caused a live hijack of Profile A.**
 
-Under VNC + virtual display, **neither holds**: B renders to its own virtual display, and the
-agent-server (running in B's session) only ever acts on **B's** session — never A's physical
-screen.
+`pyautogui` posts input through the macOS **HID event tap** (`kCGHIDEventTap`), which
+delivers events to the **active console session = the foreground = Profile A** — regardless
+of which login session the process runs in. So the agent's clicks/keys landed in **A**, not B.
+The original `is_profile_b_active_console()` gate was **correct**; bypassing it re-enabled
+exactly the hijack it existed to prevent.
 
-### The redesign: an explicit, opt-in "VNC-supervised" mode
-We do **not** silently loosen the guard. We add a deliberate operator flag:
+> **Asymmetry worth remembering:** *screen capture* in B's session (`ImageGrab` /
+> `CGWindowListCreateImage`) correctly grabs **B's** display. Only **input** leaks to the
+> foreground. So you can *see* B from a background process, but you cannot *pixel-control* it.
 
-```
-VNC_SUPERVISED_MODE=true   # set when launching agent-server in Profile B
-```
+**Resolution:** `VNC_SUPERVISED_MODE` and `desktop_control_allowed()` were **removed**.
+Pixel `computer_use` is permanently fail-closed (blocked unless B is the physical console).
 
-- `vnc_supervised()` — reads that flag (default **false** → fail-closed unchanged).
-- `desktop_control_allowed()` = `is_profile_b_active_console()` **or** `vnc_supervised()`.
-- `computer_use` block and screen capture now gate on `desktop_control_allowed()`.
-- The agent-server `/` endpoint reports `control_allowed` (and `vnc_supervised`) alongside the
-  truthful `active_console`.
-- The orchestrator gates its "switch to Profile B" nudge on `control_allowed`, not raw
-  `active_console` — so in VNC mode it proceeds with desktop control instead of nudging.
+### The session-correct toolkit (use these instead of background pixels)
+To act on **B** from a background process without hijacking A, use mechanisms that run in
+the **caller's** session, not the HID tap:
 
-Safety properties preserved:
-- Default (flag unset) = **identical fail-closed behavior**; a detection error still blocks.
-- `active_console` is still reported truthfully (the flag is additive, not a lie).
-- Enabling control is a conscious operator action that asserts "B has a live virtual display
-  under VNC," accepting that capture/control target B's session.
+| Need | Tool | Why it's safe |
+| :--- | :--- | :--- |
+| Launch an app | **`open -a` (`open_app` action)** | LaunchServices launches in the caller's session (B) |
+| Web | **Chrome CDP** (our `extract`/scrape) | DOM-level, no OS input events |
+| In-app actions / menus | **AppleScript (`osascript`)** | Targets the app in B's session (needs Automation TCC) |
+| Manual takeover | **VNC/RFB input** | `screensharingd` injects into B's session |
+| Pixel control | **pyautogui** | ⚠️ HID tap → foreground; only when B IS the console |
+
+True background *pixel* control would require posting via `kCGSessionEventTap` (the caller's
+session) instead of the HID tap, or injecting through the RFB channel — not implemented.
 
 ---
 
 ## 5. Integration roadmap
 
-1. **Failsafe change** *(this doc's §4 — implemented as a prototype)* — unlocks
-   agent-controls-B-while-you-watch.
+1. **Reliable session-safe actions first** — `open_app` (done), plus AppleScript for in-app
+   control. Avoid background pixels entirely.
 2. **Embed the view in the notch app** — replace the MJPEG `PipView` with an inline VNC view:
    - fast path: **noVNC** in a `WKWebView` (+ `websockify` bridging 5901→WebSocket), or
    - native: a Swift RFB client (e.g. RoyalVNC) rendering into an `NSView`.

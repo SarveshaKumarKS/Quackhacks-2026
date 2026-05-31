@@ -3,6 +3,7 @@ import os
 import sys
 import io
 import asyncio
+import subprocess
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
@@ -102,22 +103,12 @@ def is_profile_b_active_console() -> bool:
         # global screen capture to run against Profile A. See ROUTING.md §4.
         return False
 
-
-def vnc_supervised() -> bool:
-    """
-    Operator opt-in (default OFF): Profile B is being supervised over VNC with a live
-    virtual display, so desktop control + capture are intentionally permitted even when
-    B is not the physical-console foreground. See docs/VNC_INTEGRATION.md §4.
-    Setting this is a conscious assertion that the agent only ever acts on B's session.
-    """
-    return os.getenv("VNC_SUPERVISED_MODE", "false").lower() == "true"
-
-
-def desktop_control_allowed() -> bool:
-    """Desktop control/capture is allowed if B is the physical foreground console OR
-    B is explicitly running in VNC-supervised mode. Default (flag unset) is identical
-    fail-closed behavior to is_profile_b_active_console()."""
-    return is_profile_b_active_console() or vnc_supervised()
+# NOTE: a prior "VNC_SUPERVISED_MODE" flag once let pixel control run while B was
+# backgrounded. That was unsafe: pyautogui posts via the HID event tap, which targets
+# the FOREGROUND console (Profile A) regardless of which session the process runs in —
+# so it hijacked A. It has been removed. Pixel control stays fail-closed. For launching
+# apps in B safely, use the session-correct `open_app` action (LaunchServices runs in
+# the caller's session). See docs/VNC_INTEGRATION.md.
 
 def generate_background_failsafe_frame() -> bytes:
     """
@@ -175,10 +166,8 @@ def capture_screen_as_jpeg() -> bytes:
     """
     global _last_successful_frame, _is_browser_active
     
-    # Safety Check: If Profile B is in the background (and NOT VNC-supervised), protect
-    # Profile A's screen. In VNC mode B has its own virtual display, so real capture of
-    # B's session is intended.
-    if not desktop_control_allowed():
+    # Safety Check: If Profile B is in the background, protect Profile A's screen.
+    if not is_profile_b_active_console():
         # If we are actively running background browser automation and have a browser frame, return it!
         if _is_browser_active and _last_successful_frame is not None:
             return _last_successful_frame
@@ -214,9 +203,7 @@ async def root():
         "status": "online",
         "role": "agent-server",
         "port": 8421,
-        "active_console": is_profile_b_active_console(),  # truthful physical-console state
-        "vnc_supervised": vnc_supervised(),
-        "control_allowed": desktop_control_allowed(),     # what the orchestrator should gate on
+        "active_console": is_profile_b_active_console(),
     }
 
 @app.get("/frame.jpg")
@@ -501,6 +488,34 @@ async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]
         print(f"[!] Browser Use execution failure: {e}")
         return {"success": False, "error_message": str(e)}
 
+def _open_app(args: Dict[str, Any]) -> ObservationModel:
+    """Launch a macOS app in THIS process's session (Profile B) via LaunchServices
+    (`open -a`). Session-correct: it runs as the agent-server's user, so the app opens
+    in Profile B — it never touches Profile A and works regardless of foreground state.
+    This is the reliable, hijack-free way to launch apps (vs. pixel-clicking the Dock)."""
+    name = (args.get("name") or args.get("text") or "").strip()
+    if not name:
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg", screen_state="error",
+            result={"success": False, "error_message": "open_app requires a 'name'"},
+        )
+    try:
+        result = subprocess.run(["open", "-a", name], capture_output=True, text=True, timeout=10)
+        ok = result.returncode == 0
+        detail = f"Opened '{name}'" if ok else (result.stderr.strip() or f"Could not open '{name}'")
+        print(f"[Open App] {detail}")
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg",
+            screen_state="ok" if ok else "error",
+            result={"success": ok, "detail": detail},
+        )
+    except Exception as e:
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg", screen_state="error",
+            result={"success": False, "error_message": str(e)},
+        )
+
+
 @app.post("/command")
 async def execute_command(command: CommandModel):
     """
@@ -508,6 +523,11 @@ async def execute_command(command: CommandModel):
     Handles mouse movements, typing, keys, scrolling, and browser research.
     """
     print(f"[*] Command received: path={command.path}, action={command.action}, args={command.args}")
+
+    # Session-safe app launch — bypasses the pixel failsafe because LaunchServices runs
+    # in B's own session and never touches Profile A.
+    if command.action == "open_app":
+        return _open_app(command.args)
     
     if command.path == "browser_use":
         browser_result = await execute_browser_use_command(command.action, command.args)
@@ -527,8 +547,8 @@ async def execute_command(command: CommandModel):
     if command.path == "computer_use" or command.path not in ("browser_use", "noop"):
         global _is_browser_active
         _is_browser_active = False
-        # Safety Check: Block PyAutoGUI if Profile B is in the background AND not VNC-supervised.
-        if not desktop_control_allowed():
+        # Safety Check: Block PyAutoGUI if Profile B is in the background.
+        if not is_profile_b_active_console():
             print("[Failsafe Active] Blocking PyAutoGUI action because Profile B is in the background.")
             return ObservationModel(
                 screenshot_url="http://localhost:8421/frame.jpg",

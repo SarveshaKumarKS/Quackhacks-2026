@@ -457,8 +457,7 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
             try:
                 status_res = await http_client.get(f"{agent_server_url}/")
                 data = status_res.json() if status_res.status_code == 200 else {}
-                # Honor VNC-supervised mode (control_allowed), not just physical console.
-                active = data.get("control_allowed", data.get("active_console", False))
+                active = data.get("active_console", False)
             except Exception:
                 active = False
             if not active:
@@ -540,6 +539,29 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
     return f"Desktop sub-task ended (step budget reached): {task}"
 
 
+async def dispatch_open_app(app: str, agent_server_url: str) -> str:
+    """Launch a native app in Profile B via the session-safe open_app action (open -a).
+    Runs in B's own session, so it never hijacks Profile A and works regardless of
+    foreground state — the reliable alternative to pixel-clicking the Dock."""
+    cmd = CommandModel(path="computer_use", action="open_app", args={"name": app})
+    result = {}
+    async with httpx.AsyncClient() as http_client:
+        try:
+            res = await http_client.post(f"{agent_server_url}/command", json=cmd.model_dump(), timeout=15.0)
+            if res.status_code == 200:
+                result = res.json().get("result", {})
+        except Exception as e:
+            log_message(f"[!] open_app dispatch failed: {e}")
+            return ""
+    detail = result.get("detail") or result.get("error_message", "")
+    if result.get("success"):
+        log_message(f"[OpenApp] {detail}")
+        bq_save_memory("action_log", f"Opened app: {app}")
+        return detail
+    log_message(f"[OpenApp] Failed: {detail}")
+    return f"Could not open {app}: {detail}"
+
+
 async def execute_plan_step(task: str, client, agent_server_url: str, context: str) -> str:
     """Route and execute one plan step, returning its textual result for downstream steps."""
     decision = routing.classify_goal(task)
@@ -559,6 +581,10 @@ async def execute_plan_step(task: str, client, agent_server_url: str, context: s
         if routing.is_reddit_scrape_shortcut(task):
             return await reddit_summary(client, agent_server_url)
         return await web_answer(task, client, agent_server_url, extra_context=context)
+    # desktop: prefer the session-safe open_app for app launches; pixels otherwise.
+    app = routing.parse_app_launch(task)
+    if app:
+        return await dispatch_open_app(app, agent_server_url)
     return await _desktop_substep_loop(task, client, agent_server_url)
 
 
@@ -802,6 +828,15 @@ async def run_computer_use_loop(goal: str):
         await handle_web_task(goal, client, agent_server_url)
         return
 
+    # Session-safe app launch (open -a in B) — preferred over pixel-clicking the Dock,
+    # and never hijacks Profile A. Works regardless of foreground state.
+    app = routing.parse_app_launch(goal)
+    if decision.route == "desktop" and app:
+        log_message(f"[Router] App-launch '{app}' via open_app (session-safe).")
+        await dispatch_open_app(app, agent_server_url)
+        agent_state.status = "completed"
+        return
+
     loop_memory_context = memory.recall_context(goal)
     max_steps = 15
     async with httpx.AsyncClient() as http_client:
@@ -819,13 +854,9 @@ async def run_computer_use_loop(goal: str):
                 status_res = await http_client.get(f"{agent_server_url}/")
                 if status_res.status_code == 200:
                     status_data = status_res.json()
-                    # FAIL CLOSED: unknown control state is treated as no-control. In
-                    # VNC-supervised mode the agent-server reports control_allowed=true even
-                    # when not the physical console (see docs/VNC_INTEGRATION.md §4).
-                    control_allowed = status_data.get(
-                        "control_allowed", status_data.get("active_console", False)
-                    )
-                    if not control_allowed:
+                    # FAIL CLOSED: missing/unknown active_console is treated as background
+                    # so desktop computer_use is never attempted on an unverified session.
+                    if not status_data.get("active_console", False):
                         # Single classifier decides routing (ROUTING.md §5). Desktop route
                         # needs the foreground console -> nudge. mcp/browser routes are
                         # profile-independent -> proceed headlessly without switching.

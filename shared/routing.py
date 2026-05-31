@@ -11,6 +11,7 @@ The orchestrator must NOT keep its own ad-hoc keyword lists. It calls
 MCP always wins over browser/desktop (locked decision). Only "desktop" requires
 Profile B to be the foreground console; "mcp" and "browser" are profile-independent.
 """
+import re
 from typing import Literal, Optional, NamedTuple
 
 Route = Literal["mcp", "browser", "desktop"]
@@ -103,3 +104,35 @@ def classify_goal(goal: str) -> RoutingDecision:
 def is_reddit_scrape_shortcut(goal: str) -> bool:
     """True if the goal should use the dedicated fast r/MachineLearning scraper."""
     return _contains((goal or "").lower(), _REDDIT_SHORTCUT_KEYWORDS) is not None
+
+
+_APP_LAUNCH_RE = re.compile(
+    r"^\s*(?:open|launch|start|run|fire up)\s+(?:the\s+)?(.+?)(?:\s+app(?:lication)?)?\s*$",
+    re.IGNORECASE,
+)
+# Words that mean this isn't a plain native-app launch (web / file / MCP territory).
+_NOT_AN_APP = (
+    "http", "www.", ".com", ".org", ".net", "url", "website", "link", "tab",
+    "email", "e-mail", "gmail", "inbox", "mailbox", "calendar", "doc", "sheet",
+    "spreadsheet", "folder", "file", "reddit", "subreddit",
+)
+
+
+def parse_app_launch(goal: str) -> Optional[str]:
+    """
+    If the goal is a simple 'open/launch <app>' request, return the app name (for the
+    session-safe open_app action). Otherwise None. Returns None for web/file/MCP-style
+    'open' phrasings so those keep routing to browser/mcp.
+    """
+    if not goal:
+        return None
+    m = _APP_LAUNCH_RE.match(goal.strip())
+    if not m:
+        return None
+    name = m.group(1).strip().strip("\"'")
+    if not name or len(name) > 40:
+        return None
+    low = name.lower()
+    if any(t in low for t in _NOT_AN_APP):
+        return None
+    return name

@@ -5,7 +5,7 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from routing import classify_goal, is_reddit_scrape_shortcut
+from routing import classify_goal, is_reddit_scrape_shortcut, parse_app_launch
 from contract import CommandModel
 
 
@@ -69,6 +69,18 @@ class TestRouting(unittest.TestCase):
             cmd = CommandModel(path="mcp", action=action, args={})
             self.assertEqual(cmd.path, "mcp")
             self.assertEqual(cmd.action, action)
+
+    def test_parse_app_launch_basic(self):
+        self.assertEqual(parse_app_launch("open the Calculator app"), "Calculator")
+        self.assertEqual(parse_app_launch("launch Safari"), "Safari")
+        self.assertEqual(parse_app_launch("open Notes"), "Notes")
+        self.assertEqual(parse_app_launch("start System Settings"), "System Settings")
+
+    def test_parse_app_launch_rejects_non_apps(self):
+        # Web / MCP 'open' phrasings must NOT be treated as native app launches.
+        for g in ("open reddit", "open my email", "open the google doc",
+                  "open https://x.com", "what is the latest news"):
+            self.assertIsNone(parse_app_launch(g), g)
 
     def test_observation_accepts_background_lock(self):
         # Regression: the failsafe returns screen_state='background_lock'. If the

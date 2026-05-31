@@ -15,6 +15,8 @@ class CommandModel(BaseModel):
     action: Literal[
         # computer_use / browser_use verbs
         "click", "type", "key", "read", "extract", "navigate", "scroll", "hover", "screenshot", "poll_mail",
+        # session-safe system verbs (run in B's own session via LaunchServices, never hijack A)
+        "open_app",
         # mcp verbs (Google Docs / Sheets / Gmail / Calendar)
         "send_email", "append_doc", "append_sheet", "read_calendar",
     ] = Field(
