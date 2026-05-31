@@ -17,6 +17,7 @@ def get_google_credentials():
             'https://www.googleapis.com/auth/documents',
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/gmail.send',
+            'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/calendar.readonly'
         ]
     )
@@ -227,3 +228,61 @@ def create_google_sheet(title: str) -> str:
     except Exception as e:
         print(f"[!] Google Sheet creation failure (using local fallback ID): {e}")
         return "local_google_sheet_id"
+
+
+def get_unread_emails(max_results: int = 5) -> List[Dict[str, Any]]:
+    """
+    List recent UNREAD inbox emails (read-only). Returns dicts with
+    {id, sender, sender_email, subject}. Returns [] on any error (e.g. missing
+    gmail.readonly scope), so callers never crash.
+    """
+    import email.utils as eu
+    try:
+        creds = get_google_credentials()
+        service = build('gmail', 'v1', credentials=creds)
+        resp = service.users().messages().list(
+            userId='me', q='is:unread in:inbox', maxResults=max_results
+        ).execute()
+        out = []
+        for m in resp.get('messages', []):
+            meta = service.users().messages().get(
+                userId='me', id=m['id'], format='metadata',
+                metadataHeaders=['From', 'Subject']
+            ).execute()
+            headers = {h['name']: h['value'] for h in meta.get('payload', {}).get('headers', [])}
+            name, addr = eu.parseaddr(headers.get('From', ''))
+            out.append({
+                'id': m['id'],
+                'sender': name or addr or 'unknown',
+                'sender_email': addr,
+                'subject': headers.get('Subject', '(no subject)'),
+            })
+        return out
+    except Exception as e:
+        print(f"[!] Gmail unread list failure: {e}")
+        return []
+
+
+def _extract_plain_body(payload) -> str:
+    """Recursively pull the first text/plain body out of a Gmail payload."""
+    if payload.get('mimeType') == 'text/plain':
+        data = payload.get('body', {}).get('data', '')
+        if data:
+            return base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
+    for part in payload.get('parts', []) or []:
+        text = _extract_plain_body(part)
+        if text:
+            return text
+    return ''
+
+
+def get_email_body(msg_id: str, max_chars: int = 4000) -> str:
+    """Fetch the plain-text body of a message (read-only). '' on error."""
+    try:
+        creds = get_google_credentials()
+        service = build('gmail', 'v1', credentials=creds)
+        msg = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+        return _extract_plain_body(msg.get('payload', {}))[:max_chars]
+    except Exception as e:
+        print(f"[!] Gmail body fetch failure: {e}")
+        return ""

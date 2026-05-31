@@ -138,6 +138,10 @@ resume_event = asyncio.Event()
 user_response_value = ""
 MAX_DESKTOP_NUDGES = 2
 
+# Proactive inbox polling (new-email nudges)
+ENABLE_MAIL_POLLING = os.getenv("ENABLE_MAIL_POLLING", "true").lower() == "true"
+MAIL_POLL_INTERVAL = int(os.getenv("MAIL_POLL_INTERVAL", "60"))
+
 class AgentState:
     def __init__(self):
         self.status = "idle"         # "idle" | "working" | "waiting_for_user" | "completed"
@@ -148,8 +152,16 @@ class AgentState:
         self.step_count = 0
         self.pending_prompt_id = 0    # Incremented for each user prompt/nudge
         self.desktop_nudge_count = 0  # Per-task Profile B foreground nudges
+        self.pending_mail = None      # Latest new email awaiting a user decision
 
 agent_state = AgentState()
+
+
+@app.on_event("startup")
+async def _start_background_tasks():
+    """Launch the proactive inbox poller alongside the API server."""
+    asyncio.create_task(mail_poller())
+
 
 class InstructionRequest(BaseModel):
     goal: str
@@ -312,14 +324,16 @@ def _draft_email(client, goal: str, recipient_hint: str = "", revision: str = ""
         return {"to": recipient_hint or "", "subject": "", "body": response.text or ""}
 
 
-async def _handle_gmail(goal: str, client, extra_context: str = "") -> str:
-    """Draft an email, confirm with the user, and only then send (irreversible action)."""
-    # Recall a prior recipient preference if we have one.
-    recipient_hint = ""
-    for pref in bq_get_memory("preference"):
-        if "client_details" in pref:
-            recipient_hint = pref.replace("client_details:", "").strip()
-            break
+async def _handle_gmail(goal: str, client, extra_context: str = "", recipient: str = "") -> str:
+    """Draft an email, confirm with the user, and only then send (irreversible action).
+    `recipient` (when given, e.g. for a reply) overrides the remembered preference."""
+    # Use an explicit recipient (e.g. reply target) or recall a prior preference.
+    recipient_hint = recipient
+    if not recipient_hint:
+        for pref in bq_get_memory("preference"):
+            if "client_details" in pref:
+                recipient_hint = pref.replace("client_details:", "").strip()
+                break
 
     memory_context = combine_context(load_persona_context(), memory.recall_context(goal))
     if extra_context:
@@ -789,6 +803,80 @@ async def plan_tasks(goal: str, client) -> list:
     except Exception as e:
         log_message(f"[Planner] Decomposition failed: {e}. Treating as single task.")
         return [goal]
+
+
+async def handle_mail_response(response: str, email: dict, client):
+    """Act on the user's reply to a new-email nudge: dismiss, or draft a reply."""
+    r = (response or "").strip()
+    if not r or mcp_intent.is_negative(r) or r.lower() in ("ignore", "dismiss", "skip", "later"):
+        log_message(f"[Mail] Dismissed email from {email.get('sender')}.")
+        return
+    body = await asyncio.to_thread(mcp_google.get_email_body, email.get("id", ""))
+    if mcp_intent.is_affirmative(r):
+        instruction = "Write a brief, polite reply."
+    else:
+        instruction = f"Specific instruction from me for the reply: {r}"
+    subject = email.get("subject", "")
+    reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    goal = (
+        f"Draft a reply to {email.get('sender')} <{email.get('sender_email')}> about the email "
+        f"subject '{subject}'. {instruction} Use subject '{reply_subject}'.\n\n"
+        f"Their message:\n{body or '(body unavailable)'}"
+    )
+    await _handle_gmail(goal, client, recipient=email.get("sender_email", ""))
+
+
+async def mail_poller():
+    """Background task: nudge when a NEW unread inbox email arrives (read-only Gmail poll).
+    Reuses the existing waiting_for_user nudge + voice; on reply, drafts a response
+    through the normal confirm-before-send Gmail flow."""
+    global user_response_value
+    if not ENABLE_MAIL_POLLING:
+        print("[Mail] Inbox polling disabled (ENABLE_MAIL_POLLING=false).")
+        return
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("[Mail] No GOOGLE_API_KEY; inbox polling disabled.")
+        return
+    client = genai.Client(api_key=api_key)
+    await asyncio.sleep(5)  # let startup settle
+    # Baseline: treat all currently-unread mail as already seen (don't nudge on boot).
+    seen = {m["id"] for m in await asyncio.to_thread(mcp_google.get_unread_emails, 15)}
+    log_message(f"[Mail] Inbox poller started (every {MAIL_POLL_INTERVAL}s). Baseline unread: {len(seen)}.")
+    while True:
+        await asyncio.sleep(MAIL_POLL_INTERVAL)
+        if agent_state.status in ("working", "waiting_for_user"):
+            continue  # don't interrupt active work / another pending prompt
+        try:
+            unread = await asyncio.to_thread(mcp_google.get_unread_emails, 5)
+        except Exception as e:
+            log_message(f"[Mail] Poll error: {e}")
+            continue
+        new = [m for m in unread if m["id"] not in seen]
+        for m in unread:
+            seen.add(m["id"])
+        if not new:
+            continue
+        latest = new[0]
+        log_message(f"[Mail] New email from {latest['sender']}: '{latest['subject']}'")
+        agent_state.pending_mail = latest
+        agent_state.nudge_message = (
+            f"New email from {latest['sender']}: '{latest['subject']}'. "
+            "Want me to draft a reply? (yes / tell me what to say / no)"
+        )
+        agent_state.status = "waiting_for_user"
+        agent_state.pending_prompt_id += 1
+        resume_event.clear()
+        await resume_event.wait()
+        reply = user_response_value
+        agent_state.status = "working"
+        agent_state.nudge_message = ""
+        try:
+            await handle_mail_response(reply, latest, client)
+        except Exception as e:
+            log_message(f"[!] Mail response handling failed: {e}")
+        agent_state.pending_mail = None
+        agent_state.status = "completed"
 
 
 async def run_computer_use_loop(goal: str):
