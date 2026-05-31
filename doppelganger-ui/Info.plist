@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Satisfies macOS TCC security for speech and audio -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Doppelganger OS needs microphone access to listen to your voice instructions.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Doppelganger OS needs speech recognition access to transcribe your voice commands.</string>
+    
+    <!-- Premium OS Integration: Run as an agent overlay (Hides icon from the macOS Dock) -->
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

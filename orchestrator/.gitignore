@@ -1,0 +1,11 @@
+# local environment settings
+.env
+
+# service account credentials key dir
+keys/
+*.json
+
+# python runtime cache
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,8 @@
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+pyautogui>=0.9.54
+pillow>=10.2.0
+opencv-python>=4.9.0
+pyobjc>=10.1; sys_platform == 'darwin'
+pytest>=8.0.0

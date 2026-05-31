@@ -1,0 +1,70 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Swift / Xcode build files
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+xcuserdata/
+DerivedData/
+
+# Environment configurations (secrets)
+.env
+.env.*
+!.env.example
+
+# Temporary captures and logs
+test_capture.jpg
+doppelganger_execution.log
+Doppelganger_Activity_Log.csv
+Doppelganger_Mail_Drafts.txt
+Doppelganger_Research_Notes.md
+doppelganger_dataset/
+*.log
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
