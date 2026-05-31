@@ -51,10 +51,16 @@ _KEY_ALIASES = {
 
 
 def _scale_xy(x, y):
-    """Map a (1440x900) brain coordinate onto the real display's point size."""
+    """Map a (1440x900) brain coordinate onto the real display's point size, clamping
+    out-of-range values (the brain sometimes overshoots its own declared bounds, e.g.
+    y=962 > 900, which would otherwise land off-screen)."""
     try:
+        x = max(0, min(int(x), _ASSUMED_W))
+        y = max(0, min(int(y), _ASSUMED_H))
         sw, sh = pyautogui.size()
-        return int(round(x * sw / _ASSUMED_W)), int(round(y * sh / _ASSUMED_H))
+        sx = int(round(x * sw / _ASSUMED_W))
+        sy = int(round(y * sh / _ASSUMED_H))
+        return max(0, min(sx, sw - 1)), max(0, min(sy, sh - 1))
     except Exception:
         return int(x), int(y)
 

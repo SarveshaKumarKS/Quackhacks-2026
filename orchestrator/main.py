@@ -480,9 +480,10 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
             sys_prompt = (
                 "You are the visual brain of Doppelgänger OS on a macOS screen (1440x900). "
                 f"Complete this sub-task: '{task}'. Output coordinate clicks (0-1440 x 0-900), typing, "
-                "keys, or scroll. macOS shortcuts: action='key' with combos like 'command+space' opens "
-                "Spotlight; action='type' may include both 'text' and 'key'='enter' to type then submit. "
-                "When the sub-task is finished, output action='completed'."
+                "keys, or scroll. To LAUNCH an app, click its Dock/Launchpad icon (avoid Spotlight/"
+                "command+space — system hotkeys are unreliable in the background). App shortcuts "
+                "(command+c/v) work via action='key'. action='type' may include both 'text' and "
+                "'key'='enter' to type then submit. When finished, output action='completed'."
             )
             try:
                 response = await asyncio.to_thread(
@@ -872,7 +873,9 @@ async def run_computer_use_loop(goal: str):
                 "The screen resolution size is standard 1440x900 points. Output all x coordinates "
                 "between 0 and 1440, and y coordinates between 0 and 900.\n\n"
                 "Examine the screenshot, formulate your reasoning, and output the next logical step.\n"
-                "macOS shortcuts: use action='key' with combos, e.g. key='command+space' to open Spotlight. "
+                "To LAUNCH an app, click its icon in the Dock (along the bottom) or open Launchpad — "
+                "do NOT use Spotlight/command+space (system hotkeys are unreliable when B runs in the "
+                "background). App shortcuts like command+c / command+v DO work via action='key'. "
                 "To type then submit, use action='type' with BOTH 'text' and 'key'='enter'.\n"
                 "If the goal requires researching Reddit or web scraping, output action='browser_use'.\n"
                 "Otherwise, interact with the screen elements (clicks, types, scroll, keys) to complete the goal.\n"
