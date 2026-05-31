@@ -374,6 +374,8 @@ async def _handle_gmail(goal: str, client, extra_context: str = "", recipient: s
                 log_message(f"[MCP/Gmail] Email sent to {to}.")
                 bq_save_memory("preference", f"client_details: {to}")
                 bq_save_memory("action_log", f"Sent email to {to} re: '{subject}'.")
+                # Spoken confirmation in the notch (speaks on 'completed').
+                agent_state.nudge_message = f"Email sent to {to}."
                 return f"Email sent to {to} (subject: {subject})."
             log_message("[MCP/Gmail] Gmail API send failed; draft saved locally as fallback.")
             return f"Gmail send failed for {to}; draft saved locally."
