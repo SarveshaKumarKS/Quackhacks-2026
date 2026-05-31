@@ -14,6 +14,9 @@ let package = Package(
         .executableTarget(
             name: "DoppelgangerOS",
             path: "Sources",
+            resources: [
+                .process("Resources")
+            ],
             // Embeds the physical Info.plist directly into the Mach-O binary __info_plist segment
             // This is the absolute cleanest systems-level way to satisfy macOS TCC without an .app bundle.
             linkerSettings: [
