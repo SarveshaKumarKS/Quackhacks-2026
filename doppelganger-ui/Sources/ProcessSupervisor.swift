@@ -31,6 +31,8 @@ class ProcessSupervisor: ObservableObject {
             currentDir + "/../orchestrator/main.py",
             Bundle.main.bundlePath + "/" + scriptPath,
             Bundle.main.bundlePath + "/../../../orchestrator/main.py",
+            Bundle.main.bundlePath + "/../../../../orchestrator/main.py",
+            Bundle.main.bundlePath + "/../../../../../orchestrator/main.py",
             scriptPath
         ]
         
