@@ -1,41 +1,58 @@
 import SwiftUI
+import AppKit
 
-/// Renders one frame from a horizontal sprite sheet of 4 equal-width frames.
-/// The asset `Gemini_Generated_Image_khfgaekhfgaekhfg.png` must live in
-/// Sources/Resources/ so SwiftPM bundles it as a module resource.
+/// Shows the duck mascot for the current agent status, from 4 separate PNGs placed in
+/// `Sources/Resources/` (bundled by SwiftPM). Falls back to an SF Symbol if an image
+/// can't be loaded, so the mascot is never silently invisible.
 ///
-/// Frame mapping:
-///   0 → .idle (sleeping duck with beanie)
-///   1 → .working (duck typing at keyboard)
-///   2 → .waitingForUser (duck with question mark)
-///   3 → unused fallback (cheering duck — reserved for a future "completed" status)
+/// Expected files (square, transparent background ideal):
+///   duck_idle.png     → .idle           (sleeping)
+///   duck_working.png  → .working        (typing)
+///   duck_waiting.png  → .waitingForUser (question mark)
+///   duck_done.png     → reserved for a future "completed" status
 struct MascotView: View {
     var status: AgentStatus
     var size: CGFloat = 24
 
-    private let frameCount: CGFloat = 4
-    private let assetName: String = "Gemini_Generated_Image_khfgaekhfgaekhfg"
-
-    private var frameIndex: Int {
+    private var imageName: String {
         switch status {
-        case .idle:           return 0
-        case .working:        return 1
-        case .waitingForUser: return 2
+        case .idle:           return "duck_idle"
+        case .working:        return "duck_working"
+        case .waitingForUser: return "duck_waiting"
         }
     }
 
     var body: some View {
-        // The sprite sheet is 4 frames wide. We render the full sheet at
-        // (size * 4) wide, then shift it left by (size * frameIndex) and
-        // clip to a (size × size) window to expose just the chosen frame.
-        Image(assetName, bundle: .module)
-            .resizable()
-            .interpolation(.high)
-            .aspectRatio(frameCount, contentMode: .fit) // total sheet is 4:1
-            .frame(width: size * frameCount, height: size)
-            .offset(x: -CGFloat(frameIndex) * size)
-            .frame(width: size, height: size, alignment: .leading)
-            .clipped()
-            .animation(.easeInOut(duration: 0.25), value: frameIndex)
+        Group {
+            if let nsImage = MascotView.load(imageName) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                // Never blank: a tinted placeholder also tells us the image didn't load.
+                Image(systemName: "bird.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.mallardGreen)
+                    .opacity(0.85)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(.easeInOut(duration: 0.2), value: imageName)
+    }
+
+    /// Robust loader: tries the app's main bundle, the SwiftPM module bundle, and the
+    /// copied SPM resource bundle inside the .app, then the asset-catalog name.
+    private static func load(_ name: String) -> NSImage? {
+        for b in [Bundle.main, Bundle.module] {
+            if let url = b.url(forResource: name, withExtension: "png"),
+               let img = NSImage(contentsOf: url) { return img }
+        }
+        if let res = Bundle.main.resourceURL?
+            .appendingPathComponent("DoppelgangerOS_DoppelgangerOS.bundle")
+            .appendingPathComponent(name + ".png"),
+           let img = NSImage(contentsOf: res) { return img }
+        return NSImage(named: name)
     }
 }

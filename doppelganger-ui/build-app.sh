@@ -24,6 +24,15 @@ mkdir -p "$MACOS" "$RESOURCES"
 cp "$BIN_PATH" "$MACOS/$APP_NAME"
 cp "Info.plist" "$CONTENTS/Info.plist"
 
+# Copy SwiftPM resource bundles (e.g. the mascot sprite sheet) so Bundle.module resolves
+# them inside the .app — into both Resources/ and next to the executable to be safe.
+BIN_DIR="$(swift build --show-bin-path)"
+for b in "$BIN_DIR"/*.bundle; do
+  [ -e "$b" ] || continue
+  cp -R "$b" "$RESOURCES/"
+  cp -R "$b" "$MACOS/"
+done
+
 cat > "$CONTENTS/PkgInfo" <<'EOF'
 APPL????
 EOF

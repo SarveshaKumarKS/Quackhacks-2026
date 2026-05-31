@@ -33,7 +33,7 @@ struct ContentView: View {
     @State private var isPinned: Bool = false
     @State private var collapseWorkItem: DispatchWorkItem? = nil
 
-    private let mascotSize: CGFloat = 64
+    private let mascotSize: CGFloat = 84
 
     /// Stay expanded if any of: hovering, pinned, mid-input, recording, or a nudge is awaiting approval.
     private var shouldExpand: Bool {
@@ -75,7 +75,7 @@ struct ContentView: View {
 
     private var mascotPill: some View {
         HStack(spacing: 10) {
-            MascotView(status: status, size: 28)
+            MascotView(status: status, size: 48)
 
             if shouldExpand {
                 Text(pillLabel)
@@ -109,6 +109,14 @@ struct ContentView: View {
         .onHover { hovering in
             handleHover(hovering)
         }
+        // Click the mascot to toggle the panel open/closed (like the old chevron),
+        // alongside hover-to-peek. Pinning keeps it open when the mouse leaves.
+        .onTapGesture {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isPinned.toggle()
+            }
+        }
+        .help(isPinned ? "Click to collapse" : "Click to keep open")
     }
 
     // MARK: - Expanded panel
