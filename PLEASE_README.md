@@ -4,11 +4,11 @@
 
 An attempted `git push` to this repository surfaced under the GitHub account
 **`SanthoshBaradwaj`**. This was **not** an intentional push by Santhosh — it
-happened because I was working on **Santhosh's laptop because I had borrowed it for the hackathon**, which still had his
+happened because  **Kishan** was working on **Santhosh's laptop as he had borrowed it for the hackathon**, which still had his
 GitHub credentials cached in git / the OS credential store.
 
-When I ran the push, git used those saved credentials, so the request appeared
-to come from `SanthoshBaradwaj`. After i realized that this happened we made sure that this did not happen again.
+When **Kishan** ran the push, git used those saved credentials, so the request appeared
+to come from `SanthoshBaradwaj`. After he realized that this happened we made sure that this did not happen again.
 
 ## What this was for
 
