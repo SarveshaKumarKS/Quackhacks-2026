@@ -41,11 +41,14 @@ pyautogui.PAUSE = 0.05       # 50ms standard delay to mimic human input cadence
 
 app = FastAPI(title="Doppelgänger OS — Agent Server (Profile B)", version="1.1")
 
+_last_successful_frame = None
+
 def capture_screen_as_jpeg() -> bytes:
     """
     Captures the current active desktop screen of Profile B using Pillow/Quartz.
     Returns highly compressed JPEG bytes to optimize streaming bandwidth.
     """
+    global _last_successful_frame
     try:
         screenshot = ImageGrab.grab()
         # Convert RGBA/LA formats (which contain transparency/alpha channels) to standard RGB
@@ -55,10 +58,15 @@ def capture_screen_as_jpeg() -> bytes:
         # Compress image to 60% quality to maximize frame-rate over localhost
         buffer = io.BytesIO()
         screenshot.save(buffer, format="JPEG", quality=60)
-        return buffer.getvalue()
+        frame_bytes = buffer.getvalue()
+        _last_successful_frame = frame_bytes
+        return frame_bytes
     except Exception as e:
         print(f"[!] Screen capture failure: {e}")
-        # Return a solid black placeholder frame if background session is asleep/locked
+        # Return the last successful frame to avoid screen flickering
+        if _last_successful_frame is not None:
+            return _last_successful_frame
+        # Return a solid black placeholder frame if background session is asleep/locked and no cache exists
         black_placeholder = Image.new("RGB", (1024, 768), color="black")
         buffer = io.BytesIO()
         black_placeholder.save(buffer, format="JPEG")
@@ -74,7 +82,7 @@ async def get_frame():
     Exposes a single screenshot frame as image/jpeg.
     Used by the Orchestrator for Gemini Computer Use vision input.
     """
-    frame_bytes = capture_screen_as_jpeg()
+    frame_bytes = await asyncio.to_thread(capture_screen_as_jpeg)
     return Response(content=frame_bytes, media_type="image/jpeg")
 
 async def stream_generator():
@@ -83,7 +91,7 @@ async def stream_generator():
     Throttled to 10 FPS to balance low latency with zero CPU pinning.
     """
     while True:
-        frame_bytes = capture_screen_as_jpeg()
+        frame_bytes = await asyncio.to_thread(capture_screen_as_jpeg)
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         # 100ms throttle (10 FPS)
@@ -144,16 +152,27 @@ async def scrape_reddit_ml() -> Dict[str, Any]:
     print("[Scraper] Falling back to zero-dependency live Hacker News tech/AI API...")
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get("https://hacker-news.firebaseio.com/v0/topstories.json")
+            res = await client.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=5.0)
             if res.status_code == 200:
-                story_ids = res.json()[:30]
+                story_ids = res.json()[:12]
+                
+                async def fetch_story(sid):
+                    try:
+                        item_res = await client.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", timeout=3.0)
+                        if item_res.status_code == 200:
+                            return item_res.json()
+                    except Exception as e:
+                        print(f"[Scraper] Failed to fetch story {sid}: {e}")
+                    return None
+
+                tasks = [fetch_story(sid) for sid in story_ids]
+                items = await asyncio.gather(*tasks)
+                
                 posts = []
-                for story_id in story_ids:
-                    item_res = await client.get(f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json")
-                    if item_res.status_code == 200:
-                        item = item_res.json()
+                for item in items:
+                    if item:
                         title = item.get("title", "")
-                        url = item.get("url", f"https://news.ycombinator.com/item?id={story_id}")
+                        url = item.get("url", f"https://news.ycombinator.com/item?id={item.get('id')}")
                         
                         # Prioritize AI / Machine Learning related posts
                         keywords = ["ai", "ml", "machine learning", "deep learning", "llm", "neural", "gpu", "model", "gpt", "anthropic", "openai", "gemini", "nvidia", "hugging face", "transformer"]
