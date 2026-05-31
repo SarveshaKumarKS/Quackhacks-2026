@@ -128,16 +128,54 @@ async def scrape_reddit_ml() -> Dict[str, Any]:
             page = await context.new_page()
             
             await page.goto("https://www.reddit.com/r/MachineLearning/hot/", timeout=10000)
-            # Wait for main posts listing
-            await page.wait_for_selector("a[data-click-id='body']", timeout=4000)
             
-            posts = []
-            post_elements = await page.query_selector_all("a[data-click-id='body']")
-            for elem in post_elements[:3]:
-                title = await elem.inner_text()
-                href = await elem.get_attribute("href")
-                url = f"https://www.reddit.com{href}" if href and href.startswith("/") else href
-                posts.append({"title": title, "url": url})
+            # Resilient wait for any standard modern/legacy post element to load
+            try:
+                await page.wait_for_selector("shreddit-post, a[data-click-id='body'], a[slot='full-post-link'], h3", timeout=5000)
+            except Exception:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            
+            # Robust browser-side post extraction covering multiple layout generations
+            posts = await page.evaluate('''() => {
+                let items = [];
+                // 1. Try modern Reddit shreddit-post custom elements
+                let shredditPosts = document.querySelectorAll('shreddit-post');
+                for (let post of shredditPosts) {
+                    let title = post.getAttribute('post-title');
+                    let href = post.getAttribute('content-href') || post.getAttribute('permalink');
+                    if (title && href) {
+                        items.push({title: title.trim(), url: href.startsWith('/') ? 'https://www.reddit.com' + href : href});
+                    }
+                }
+                
+                // 2. Try standard full-post-link elements
+                if (items.length < 3) {
+                    let links = document.querySelectorAll("a[data-click-id='body'], a[slot='full-post-link']");
+                    for (let a of links) {
+                        let title = a.innerText.trim();
+                        let href = a.getAttribute('href');
+                        if (title && href) {
+                            items.push({title, url: href.startsWith('/') ? 'https://www.reddit.com' + href : href});
+                        }
+                    }
+                }
+                
+                // 3. Resilient fallback to heading links (h3/h2)
+                if (items.length < 3) {
+                    let headings = document.querySelectorAll('h3, h2');
+                    for (let h of headings) {
+                        let title = h.innerText.trim();
+                        let a = h.closest('a') || h.querySelector('a') || h.parentElement.closest('a');
+                        if (title && a) {
+                            let href = a.getAttribute('href');
+                            if (href) {
+                                items.push({title, url: href.startsWith('/') ? 'https://www.reddit.com' + href : href});
+                            }
+                        }
+                    }
+                }
+                return items.slice(0, 3);
+            }''')
                 
             await page.close()
             await browser.close()
