@@ -81,9 +81,14 @@ of which login session the process runs in. So the agent's clicks/keys landed in
 The original `is_profile_b_active_console()` gate was **correct**; bypassing it re-enabled
 exactly the hijack it existed to prevent.
 
-> **Asymmetry worth remembering:** *screen capture* in B's session (`ImageGrab` /
-> `CGWindowListCreateImage`) correctly grabs **B's** display. Only **input** leaks to the
-> foreground. So you can *see* B from a background process, but you cannot *pixel-control* it.
+> **Both capture AND input target the foreground (verified).** `ImageGrab` /
+> `CGWindowListCreateImage` from B's backgrounded session captures **Profile A's** screen
+> (the main display), not B's — just like `pyautogui` input lands on A. So the MJPEG
+> capture pipeline **cannot** show B's screen and must stay fail-closed (showing it would
+> leak A). The **only** way to view B's actual session is the **VNC server**
+> (`screensharingd` / Vine Server), which has the privilege to render and serve B's
+> *virtual display* independent of the main display. Capture stays fail-closed; "see B"
+> means the VNC channel, not screen-grab.
 
 **Resolution:** `VNC_SUPERVISED_MODE` and `desktop_control_allowed()` were **removed**.
 Pixel `computer_use` is permanently fail-closed (blocked unless B is the physical console).
