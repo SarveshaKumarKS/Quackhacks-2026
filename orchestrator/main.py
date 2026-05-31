@@ -456,7 +456,9 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
         for step in range(1, max_steps + 1):
             try:
                 status_res = await http_client.get(f"{agent_server_url}/")
-                active = status_res.status_code == 200 and status_res.json().get("active_console", False)
+                data = status_res.json() if status_res.status_code == 200 else {}
+                # Honor VNC-supervised mode (control_allowed), not just physical console.
+                active = data.get("control_allowed", data.get("active_console", False))
             except Exception:
                 active = False
             if not active:
@@ -477,8 +479,10 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
 
             sys_prompt = (
                 "You are the visual brain of Doppelgänger OS on a macOS screen (1440x900). "
-                f"Complete this sub-task: '{task}'. Output coordinate clicks, typing, keys, or "
-                "scroll to accomplish it. When the sub-task is finished, output action='completed'."
+                f"Complete this sub-task: '{task}'. Output coordinate clicks (0-1440 x 0-900), typing, "
+                "keys, or scroll. macOS shortcuts: action='key' with combos like 'command+space' opens "
+                "Spotlight; action='type' may include both 'text' and 'key'='enter' to type then submit. "
+                "When the sub-task is finished, output action='completed'."
             )
             try:
                 response = await asyncio.to_thread(
@@ -868,6 +872,8 @@ async def run_computer_use_loop(goal: str):
                 "The screen resolution size is standard 1440x900 points. Output all x coordinates "
                 "between 0 and 1440, and y coordinates between 0 and 900.\n\n"
                 "Examine the screenshot, formulate your reasoning, and output the next logical step.\n"
+                "macOS shortcuts: use action='key' with combos, e.g. key='command+space' to open Spotlight. "
+                "To type then submit, use action='type' with BOTH 'text' and 'key'='enter'.\n"
                 "If the goal requires researching Reddit or web scraping, output action='browser_use'.\n"
                 "Otherwise, interact with the screen elements (clicks, types, scroll, keys) to complete the goal.\n"
                 "If the goal has been achieved, select action='completed'."

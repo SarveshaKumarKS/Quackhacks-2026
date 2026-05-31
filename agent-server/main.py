@@ -39,6 +39,35 @@ load_env()
 pyautogui.FAILSAFE = False  # Avoid locking up in multi-session setups
 pyautogui.PAUSE = 0.05       # 50ms standard delay to mimic human input cadence
 
+# The brain reasons in a fixed 1440x900 coordinate space (see the orchestrator system
+# prompt). Scale those to the real display so clicks land correctly on Retina/other sizes.
+_ASSUMED_W, _ASSUMED_H = 1440, 900
+_KEY_ALIASES = {
+    "cmd": "command", "command": "command", "win": "command", "super": "command",
+    "control": "ctrl", "ctrl": "ctrl",
+    "opt": "option", "option": "option", "alt": "option",
+    "return": "enter", "enter": "enter", "esc": "escape", "del": "delete",
+}
+
+
+def _scale_xy(x, y):
+    """Map a (1440x900) brain coordinate onto the real display's point size."""
+    try:
+        sw, sh = pyautogui.size()
+        return int(round(x * sw / _ASSUMED_W)), int(round(y * sh / _ASSUMED_H))
+    except Exception:
+        return int(x), int(y)
+
+
+def _press_key(key: str):
+    """Press a single key OR a '+'-joined hotkey combo (e.g. 'command+space'),
+    normalizing names to what pyautogui expects on macOS."""
+    parts = [_KEY_ALIASES.get(p.strip().lower(), p.strip().lower()) for p in str(key).split("+")]
+    if len(parts) > 1:
+        pyautogui.hotkey(*parts)   # press combo simultaneously
+    else:
+        pyautogui.press(parts[0])
+
 app = FastAPI(title="Doppelgänger OS — Agent Server (Profile B)", version="1.1")
 
 _last_successful_frame = None
@@ -513,26 +542,32 @@ async def execute_command(command: CommandModel):
             y = args.get("y")
             if x is None or y is None:
                 raise HTTPException(status_code=400, detail="Click args must contain 'x' and 'y'")
-            pyautogui.click(x, y)
-            
+            sx, sy = _scale_xy(x, y)
+            pyautogui.click(sx, sy)
+
         elif action == "type":
             text = args.get("text")
             if text is None:
                 raise HTTPException(status_code=400, detail="Type args must contain 'text'")
-            pyautogui.write(text)
-            
+            pyautogui.write(text, interval=0.02)
+            # Honor an optional follow-up key (e.g. {"text": "Calculator", "key": "enter"}).
+            follow = args.get("key")
+            if follow:
+                _press_key(follow)
+
         elif action == "key":
             key = args.get("key")
             if key is None:
                 raise HTTPException(status_code=400, detail="Key args must contain 'key'")
-            pyautogui.press(key)
-            
+            _press_key(key)  # supports combos like 'command+space'
+
         elif action == "hover":
             x = args.get("x")
             y = args.get("y")
             if x is None or y is None:
                 raise HTTPException(status_code=400, detail="Hover args must contain 'x' and 'y'")
-            pyautogui.moveTo(x, y)
+            sx, sy = _scale_xy(x, y)
+            pyautogui.moveTo(sx, sy)
             
         elif action == "scroll":
             amount = args.get("amount", -5)
