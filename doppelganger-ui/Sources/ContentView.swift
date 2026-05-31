@@ -182,7 +182,7 @@ struct ContentView: View {
                                 speechManager.stopRecording()
                                 self.promptText = speechManager.transcription
                             } else {
-                                speechManager.startRecording()
+                                speechManager.beginRecordingWithPermissions()
                             }
                         }) {
                             Image(systemName: speechManager.isRecording ? "mic.fill" : "mic")

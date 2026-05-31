@@ -77,15 +77,31 @@ class SpeechManager: ObservableObject {
 
     // MARK: - Permissions
 
-    func requestPermissions() {
+    func requestPermissions(completion: ((Bool) -> Void)? = nil) {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 let speechOK = (status == .authorized)
                 AVCaptureDevice.requestAccess(for: .audio) { micOK in
                     DispatchQueue.main.async {
                         self.permissionGranted = speechOK && micOK
+                        completion?(self.permissionGranted)
                     }
                 }
+            }
+        }
+    }
+
+    func beginRecordingWithPermissions() {
+        if permissionGranted {
+            startRecording()
+            return
+        }
+        requestPermissions { [weak self] granted in
+            guard let self = self else { return }
+            if granted {
+                self.startRecording()
+            } else {
+                print("[Speech] Microphone or Speech Recognition permission was not granted. Type instead.")
             }
         }
     }
