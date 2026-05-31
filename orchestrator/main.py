@@ -45,6 +45,31 @@ load_env()
 # Local-first agent memory (BigQuery mirror when GCP_PROJECT_ID is set).
 memory = MemoryStore()
 
+def load_persona_context(max_chars: int = 6000) -> str:
+    """
+    Best-effort local persona context. Files are manually editable and live outside
+    the repo so setup can persist identity across code updates.
+    """
+    persona_home = os.getenv("DOPPELGANGER_HOME", os.path.expanduser("~/.doppelganger"))
+    parts = []
+    for filename, label in (("identity.md", "Identity"), ("preferences.md", "Preferences")):
+        path = os.path.join(persona_home, filename)
+        try:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    text = f.read().strip()
+                if text:
+                    parts.append(f"{label} profile:\n{text}")
+        except Exception as e:
+            print(f"[Persona] Skipping {path}: {e}")
+    if not parts:
+        return ""
+    return "Doppelganger persona context (use for tone, preferences, and decisions):\n" + "\n\n".join(parts)[:max_chars]
+
+def combine_context(*blocks: str) -> str:
+    """Join non-empty context blocks for prompt preambles."""
+    return "\n\n".join(b for b in blocks if b)
+
 # Zero-configuration auto-initialization for Google Workspace Docs/Sheets
 def auto_init_google_docs():
     doc_id = os.getenv("GOOGLE_DOC_ID")
@@ -296,10 +321,12 @@ async def _handle_gmail(goal: str, client, extra_context: str = "") -> str:
             recipient_hint = pref.replace("client_details:", "").strip()
             break
 
-    memory_context = memory.recall_context(goal)
+    memory_context = combine_context(load_persona_context(), memory.recall_context(goal))
     if extra_context:
-        memory_context = (memory_context + "\n\n" if memory_context else "") + \
-            "Context from earlier steps (use this in the email):\n" + extra_context
+        memory_context = combine_context(
+            memory_context,
+            "Context from earlier steps (use this in the email):\n" + extra_context,
+        )
     revision = ""
     for _ in range(3):  # at most 3 draft/confirm rounds
         draft = await asyncio.to_thread(_draft_email, client, goal, recipient_hint, revision, memory_context)
@@ -361,10 +388,14 @@ async def _handle_docs(goal: str, client, extra_context: str = "") -> str:
     if extra_context:
         content = extra_context
     else:
+        persona_context = load_persona_context()
+        doc_prompt = mcp_intent.build_doc_content_prompt(goal)
+        if persona_context:
+            doc_prompt = persona_context + "\n\n" + doc_prompt
         resp = await asyncio.to_thread(
             client.models.generate_content,
             model='gemini-3-flash-preview',
-            contents=mcp_intent.build_doc_content_prompt(goal),
+            contents=doc_prompt,
         )
         content = resp.text or ""
     if doc_id:
@@ -427,7 +458,7 @@ async def web_answer(goal: str, client, agent_server_url: str, extra_context: st
     log_message(f"[Web] Extracted {len(text)} chars from {result.get('page_url', target)}. Summarizing via Gemini...")
     web_prompt = web_intent.build_web_answer_prompt(goal, text)
     mem_context = memory.recall_context(goal)
-    preamble = "\n\n".join(p for p in (mem_context, extra_context) if p)
+    preamble = combine_context(load_persona_context(), mem_context, extra_context)
     if preamble:
         web_prompt = preamble + "\n\n" + web_prompt
     resp = await asyncio.to_thread(
@@ -488,9 +519,10 @@ async def reddit_summary(client, agent_server_url: str) -> str:
             posts = []
     if not posts:
         return ""
-    summary_prompt = (
+    summary_prompt = combine_context(
+        load_persona_context(),
         "Write a concise, professional digest of these top posts. "
-        "Use markdown with bold headings, bullets, and clean URLs:\n\n"
+        "Use markdown with bold headings, bullets, and clean URLs:\n\n",
     )
     for idx, p in enumerate(posts, 1):
         summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"
@@ -684,7 +716,10 @@ async def execute_plan_step(task: str, client, agent_server_url: str, context: s
         resp = await asyncio.to_thread(
             client.models.generate_content,
             model='gemini-3-flash-preview',
-            contents=planner.build_context_transform_prompt(task, context),
+            contents=combine_context(
+                load_persona_context(),
+                planner.build_context_transform_prompt(task, context),
+            ),
         )
         return resp.text or ""
     if decision.route == "browser":
@@ -873,10 +908,11 @@ async def run_computer_use_loop(goal: str):
                     
                     if posts:
                         # 1. Summarize posts
-                        summary_prompt = (
+                        summary_prompt = combine_context(
+                            load_persona_context(),
                             "Write a beautiful, highly professional and detailed newsletter-style digest summary "
                             "of the following 3 hot Machine Learning posts. Use markdown formatting with clear bold headings, "
-                            "bulleted insights, and clean URLs:\n\n"
+                            "bulleted insights, and clean URLs:\n\n",
                         )
                         for idx, p in enumerate(posts, 1):
                             summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"
@@ -957,7 +993,7 @@ async def run_computer_use_loop(goal: str):
             _complete_with_message("Done. " + (out or "AppleScript action completed.")[:300])
             return
 
-    loop_memory_context = memory.recall_context(goal)
+    loop_memory_context = combine_context(load_persona_context(), memory.recall_context(goal))
     max_steps = 15
     async with httpx.AsyncClient() as http_client:
         for step in range(1, max_steps + 1):
@@ -1142,10 +1178,11 @@ async def run_computer_use_loop(goal: str):
                             
                             if posts:
                                 # 1. Summarize posts
-                                summary_prompt = (
+                                summary_prompt = combine_context(
+                                    load_persona_context(),
                                     "Write a beautiful, highly professional and detailed newsletter-style digest summary "
                                     "of the following 3 hot Machine Learning posts. Use markdown formatting with clear bold headings, "
-                                    "bulleted insights, and clean URLs:\n\n"
+                                    "bulleted insights, and clean URLs:\n\n",
                                 )
                                 for idx, p in enumerate(posts, 1):
                                     summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"

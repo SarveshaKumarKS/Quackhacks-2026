@@ -118,11 +118,14 @@ session) instead of the HID tap, or injecting through the RFB channel — not im
 
 1. **Reliable session-safe actions first** — `open_app` (done), plus AppleScript for in-app
    control. Avoid background pixels entirely.
-2. **Embed the view in the notch app** — replace the MJPEG `PipView` with an inline VNC view:
-   - fast path: **noVNC** in a `WKWebView` (+ `websockify` bridging 5901→WebSocket), or
-   - native: a Swift RFB client (e.g. RoyalVNC) rendering into an `NSView`.
-3. **Auto-start the plumbing** — script the SSH tunnel (or Vine Server) + the LaunchAgent
-   pattern, so none of it is manual.
+2. **Demo-ready VNC path** — keep the in-app MJPEG `PipView` for now and use
+   `setup/start-vnc-tunnel.sh` plus `open vnc://localhost:5901` for optional full
+   desktop viewing/manual takeover.
+3. **Auto-start the plumbing** — Profile B agent-server and Chrome CDP are installed
+   as LaunchAgents by `setup/provision.sh`; VNC remains an explicit operator choice.
+
+Embedding noVNC in the notch app is intentionally out of scope for this MVP. It is a
+good follow-up once the script-based viewer is stable.
 
 ---
 

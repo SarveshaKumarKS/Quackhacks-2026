@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.doppelganger.chrome</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>mkdir -p "$HOME/.doppelganger-chrome" "$HOME/Library/Logs/DoppelgangerOS" &amp;&amp; exec /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.doppelganger-chrome"</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/clone/Library/Logs/DoppelgangerOS/chrome.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/clone/Library/Logs/DoppelgangerOS/chrome.err.log</string>
+</dict>
+</plist>
