@@ -153,6 +153,7 @@ class AgentState:
         self.pending_prompt_id = 0    # Incremented for each user prompt/nudge
         self.desktop_nudge_count = 0  # Per-task Profile B foreground nudges
         self.pending_mail = None      # Latest new email awaiting a user decision
+        self.speech_seq = 0           # Bumps per spoken message so identical text re-speaks
 
 agent_state = AgentState()
 
@@ -183,7 +184,8 @@ async def get_state():
         "nudge_message": agent_state.nudge_message,
         "logs": agent_state.logs,
         "step_count": agent_state.step_count,
-        "pending_prompt_id": agent_state.pending_prompt_id
+        "pending_prompt_id": agent_state.pending_prompt_id,
+        "speech_seq": agent_state.speech_seq
     }
 
 @app.post("/instruction")
@@ -255,11 +257,13 @@ def log_message(text: str):
 def _set_waiting_prompt(prompt_text: str) -> int:
     """Surface a user prompt and return the prompt id used for stale-response guards."""
     agent_state.pending_prompt_id += 1
+    agent_state.speech_seq += 1
     agent_state.nudge_message = prompt_text
     agent_state.status = "waiting_for_user"
     return agent_state.pending_prompt_id
 
 def _complete_with_message(message: str):
+    agent_state.speech_seq += 1
     agent_state.nudge_message = message
     agent_state.status = "completed"
 

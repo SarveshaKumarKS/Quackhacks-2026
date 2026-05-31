@@ -24,6 +24,13 @@ class TestPlanner(unittest.TestCase):
         self.assertFalse(planner.looks_compound("send an email to sam"))
         self.assertFalse(planner.looks_compound("summarize the machine learning subreddit"))
 
+    def test_next_noun_not_compound(self):
+        # "next meeting"/"next email" must NOT trigger the planner (bare " next " bug).
+        self.assertFalse(planner.looks_compound("when is my next meeting"))
+        self.assertFalse(planner.looks_compound("read my next email"))
+        # genuine sequencing with 'next' still counts
+        self.assertTrue(planner.looks_compound("summarize reddit, next draft an email"))
+
     def test_plan_prompt_contains_goal(self):
         self.assertIn("scrape and email", planner.build_plan_prompt("scrape and email"))
 

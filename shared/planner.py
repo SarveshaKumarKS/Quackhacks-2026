@@ -8,9 +8,11 @@ for simple goals), `build_plan_prompt` to ask Gemini for a decomposition, and
 import re
 from typing import List, Any
 
+# Sequencing phrases that signal a multi-step request. NOTE: bare " next " is avoided
+# because it false-matches "next meeting"/"next email"; use ", next " / " and next ".
 _COMPOUND_MARKERS = (
     " then ", " and then ", "; ", " after that ", " followed by ",
-    " next ", " also ", " finally ", " lastly ",
+    ", next ", " and next ", " also ", " finally ", " lastly ",
 )
 
 MAX_STEPS = 8

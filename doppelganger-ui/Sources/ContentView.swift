@@ -12,6 +12,7 @@ struct OrchestratorState: Codable {
     let logs: [String]
     let step_count: Int
     let pending_prompt_id: Int?
+    let speech_seq: Int?
 }
 
 struct ContentView: View {
@@ -396,7 +397,9 @@ struct ContentView: View {
 
                     let shouldSpeak = stateResponse.status == "waiting_for_user" ||
                         stateResponse.status == "completed"
-                    let voiceKey = "\(stateResponse.status):\(newNudge)"
+                    // Key on the server's speech sequence so each finished task / nudge
+                    // speaks once — even when the text is identical to last time.
+                    let voiceKey = "seq:\(stateResponse.speech_seq ?? 0)"
                     if shouldSpeak,
                        !newNudge.isEmpty,
                        voiceKey != self.lastSpokenMessageKey {
