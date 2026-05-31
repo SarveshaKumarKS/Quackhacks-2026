@@ -9,7 +9,7 @@ import AppKit
 ///   duck_idle.png     → .idle           (sleeping)
 ///   duck_working.png  → .working        (typing)
 ///   duck_waiting.png  → .waitingForUser (question mark)
-///   duck_done.png     → reserved for a future "completed" status
+///   duck_done.png     → .completed       (cheering, shown briefly after a task)
 struct MascotView: View {
     var status: AgentStatus
     var size: CGFloat = 24
@@ -19,6 +19,7 @@ struct MascotView: View {
         case .idle:           return "duck_idle"
         case .working:        return "duck_working"
         case .waitingForUser: return "duck_waiting"
+        case .completed:      return "duck_done"
         }
     }
 

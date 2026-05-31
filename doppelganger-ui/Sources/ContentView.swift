@@ -4,6 +4,7 @@ enum AgentStatus {
     case idle
     case working
     case waitingForUser
+    case completed   // brief celebratory state right after a task finishes
 }
 
 struct OrchestratorState: Codable {
@@ -28,6 +29,9 @@ struct ContentView: View {
     @State private var pendingPromptId: Int? = nil
     @State private var isApprovalSubmitting: Bool = false
     @State private var lastSpokenMessageKey: String = ""
+    // Show the happy duck for a few seconds after a task completes, then go back to idle.
+    @State private var completedShownAt: Date? = nil
+    @State private var lastCompletionSeq: Int = -1
 
     // Floating-widget interaction state
     @State private var isHovering: Bool = false
@@ -337,6 +341,7 @@ struct ContentView: View {
         case .idle:           return "Ready"
         case .working:        return "Step \(stepCount)…"
         case .waitingForUser: return "Action needed"
+        case .completed:      return "Done!"
         }
     }
 
@@ -382,10 +387,26 @@ struct ContentView: View {
                     self.stepCount = stateResponse.step_count
                     let newPromptId = stateResponse.pending_prompt_id
 
+                    let seq = stateResponse.speech_seq ?? 0
                     switch stateResponse.status {
-                    case "working":          self.status = .working
-                    case "waiting_for_user": self.status = .waitingForUser
-                    default:                 self.status = .idle
+                    case "working":
+                        self.status = .working
+                    case "waiting_for_user":
+                        self.status = .waitingForUser
+                    case "completed":
+                        // First time we see this completion, start the cheer timer.
+                        if seq != self.lastCompletionSeq {
+                            self.lastCompletionSeq = seq
+                            self.completedShownAt = Date()
+                        }
+                        // Happy duck briefly, then settle back to sleeping (idle).
+                        if let t = self.completedShownAt, Date().timeIntervalSince(t) < 4.0 {
+                            self.status = .completed
+                        } else {
+                            self.status = .idle
+                        }
+                    default:
+                        self.status = .idle
                     }
 
                     if stateResponse.status != "waiting_for_user" {
