@@ -208,7 +208,12 @@ class SpeechManager: ObservableObject {
             let body: [String: Any] = [
                 "text": text,
                 "model_id": "eleven_turbo_v2_5",
-                "voice_settings": ["stability": 0.5, "similarity_boost": 0.75],
+                "voice_settings": [
+                    "stability": 0.35,        // lower = more emotion / variation
+                    "similarity_boost": 0.8,  // keep close to the original voice
+                    "style": 0.15,            // slight expressive exaggeration
+                    "use_speaker_boost": true,
+                ],
             ]
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
