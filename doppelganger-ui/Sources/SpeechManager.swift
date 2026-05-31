@@ -38,7 +38,10 @@ class SpeechManager: ObservableObject {
         self.elevenLabsKey = (key.isEmpty || key.contains("your-elevenlabs")) ? nil : key
         let voice = env["ELEVENLABS_VOICE_ID"] ?? ""
         self.elevenLabsVoice = voice.isEmpty ? "Rachel" : voice
-        requestPermissions()
+        // NOTE: do NOT request Speech/Mic permission here. Requesting at launch (a)
+        // pops prompts immediately and (b) hard-crashes (SIGABRT) when the usage-string
+        // Info.plist isn't honored — which happens when run via `swift run` instead of a
+        // real .app bundle. Permission is requested lazily on first mic use instead.
     }
 
     // MARK: - .env loading (orchestrator/.env on Profile A)
