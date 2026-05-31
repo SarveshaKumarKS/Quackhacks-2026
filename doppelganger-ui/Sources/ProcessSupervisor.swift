@@ -20,18 +20,32 @@ class ProcessSupervisor: ObservableObject {
         }
         
         let newProcess = Process()
-        let resolvedScriptPath = Bundle.main.bundlePath + "/" + scriptPath
         
-        // Locate python: look for virtual env binary first, fallback to system
-        let pythonExecutable = envPath ?? "/usr/bin/env"
-        newProcess.executableURL = URL(fileURLWithPath: pythonExecutable)
+        // Resolve the absolute path of the orchestrator script robustly
+        let fm = FileManager.default
+        let currentDir = fm.currentDirectoryPath
         
-        // Set arguments: if envPath isn't standard, we might invoke python directly
-        if envPath == nil {
-            newProcess.arguments = ["python3", scriptPath]
-        } else {
-            newProcess.arguments = [scriptPath]
+        var resolvedScriptPath = scriptPath
+        let pathOptions = [
+            currentDir + "/orchestrator/main.py",
+            currentDir + "/../orchestrator/main.py",
+            Bundle.main.bundlePath + "/" + scriptPath,
+            Bundle.main.bundlePath + "/../../../orchestrator/main.py",
+            scriptPath
+        ]
+        
+        for option in pathOptions {
+            if fm.fileExists(atPath: option) {
+                resolvedScriptPath = option
+                break
+            }
         }
+        print("[Supervisor] Resolved orchestrator script path to: \(resolvedScriptPath)")
+        
+        // Locate python: use user's Miniforge python to prevent ModuleNotFoundError
+        let pythonExecutable = envPath ?? "/Users/sarveshaks/miniforge3/bin/python3"
+        newProcess.executableURL = URL(fileURLWithPath: pythonExecutable)
+        newProcess.arguments = [resolvedScriptPath]
         
         // Configure standard input/output pipes
         let pipe = Pipe()
