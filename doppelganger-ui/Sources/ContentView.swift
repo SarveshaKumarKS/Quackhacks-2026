@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var timer: Timer? = nil
     @State private var logs: [String] = []
     @State private var stepCount: Int = 0
+    @State private var lastSpokenNudge: String = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -104,9 +105,10 @@ struct ContentView: View {
                             
                             Spacer()
                             
-                            // Yes / Approve Button
+                            // Yes / Approve Button — sends an affirmative so the
+                            // orchestrator's confirm-before-send gate proceeds.
                             Button(action: {
-                                self.promptText = "Handle that email"
+                                self.promptText = "yes"
                                 sendInstruction()
                             }) {
                                 Text("Approve")
@@ -319,10 +321,11 @@ struct ContentView: View {
                 let decoder = JSONDecoder()
                 let stateResponse = try decoder.decode(OrchestratorState.self, from: data)
                 DispatchQueue.main.async {
-                    self.nudgeMessage = stateResponse.nudge_message
+                    let newNudge = stateResponse.nudge_message
+                    self.nudgeMessage = newNudge
                     self.logs = stateResponse.logs
                     self.stepCount = stateResponse.step_count
-                    
+
                     switch stateResponse.status {
                     case "working":
                         self.status = .working
@@ -330,6 +333,19 @@ struct ContentView: View {
                         self.status = .waitingForUser
                     default:
                         self.status = .idle
+                    }
+
+                    // Minimal voice policy: speak a nudge ONCE, and only while waiting on
+                    // the user (a confirmation or a block). Never on working/idle, never
+                    // repeated on each 1s poll. Reset when the nudge clears so a later
+                    // identical nudge can speak again.
+                    if stateResponse.status == "waiting_for_user",
+                       !newNudge.isEmpty,
+                       newNudge != self.lastSpokenNudge {
+                        self.speechManager.speak(newNudge)
+                        self.lastSpokenNudge = newNudge
+                    } else if newNudge.isEmpty {
+                        self.lastSpokenNudge = ""
                     }
                 }
             } catch {

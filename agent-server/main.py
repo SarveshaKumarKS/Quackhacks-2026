@@ -62,8 +62,10 @@ def is_profile_b_active_console() -> bool:
         return on_console and not is_locked
     except Exception as e:
         print(f"[Active Session Check] Failed to determine console state: {e}")
-        # Default to True so it doesn't block under unexpected non-macOS environments
-        return True
+        # FAIL CLOSED: if we cannot prove Profile B is the foreground console,
+        # assume it is NOT. A detection error must never allow PyAutoGUI input or a
+        # global screen capture to run against Profile A. See ROUTING.md §4.
+        return False
 
 def generate_background_failsafe_frame() -> bytes:
     """
@@ -344,6 +346,7 @@ async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]
             
             await page.set_viewport_size({"width": 1024, "height": 768})
             result_detail = ""
+            extra: Dict[str, Any] = {}
             
             if action == "navigate":
                 url = args.get("url")
@@ -402,7 +405,25 @@ async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]
                 
             elif action == "read":
                 return await scrape_reddit_ml()
-                
+
+            elif action == "extract":
+                # Generic: navigate to the orchestrator-chosen target, then return
+                # the page's visible text for the brain to summarize/answer.
+                url = args.get("url")
+                if url:
+                    if not url.startswith("http://") and not url.startswith("https://"):
+                        url = f"https://{url}"
+                    await page.goto(url, timeout=20000)
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
+                page_title = await page.title()
+                page_text = await page.evaluate("() => (document.body ? document.body.innerText : '')")
+                page_text = (page_text or "")[:8000]
+                result_detail = f"Extracted {len(page_text)} chars from {page.url}"
+                extra = {"text": page_text, "title": page_title, "page_url": page.url}
+
             elif action == "screenshot":
                 result_detail = "Captured browser screenshot"
                 
@@ -418,7 +439,7 @@ async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]
                 print(f"[Warning] Failed to update frame after action: {se}")
                 
             await browser.close()
-            return {"success": True, "detail": result_detail}
+            return {"success": True, "detail": result_detail, **extra}
             
     except Exception as e:
         print(f"[!] Browser Use execution failure: {e}")
