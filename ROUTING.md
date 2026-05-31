@@ -135,6 +135,22 @@ These are the known divergences to fix in the follow-up implementation pass:
 
 ---
 
+## 6b. Compound tasks (the planner)
+
+A single instruction may chain several tasks across tiers
+(e.g. *"summarize a subreddit → draft an email → update the doc → save to Notes"*).
+These are handled by a planner/sequencer layer above the router:
+
+1. `planner.looks_compound(goal)` — cheap gate; simple goals skip planning entirely.
+2. If compound, Gemini decomposes the goal into an ordered list of atomic sub-tasks.
+3. The sequencer runs each sub-task through the **same** `classify_goal` router (so every
+   step obeys the tiers above), carrying each step's text output forward as shared
+   context for later steps (the summary feeds the email, the doc, and the Notes copy).
+4. Irreversible steps (email send) still hit the confirm-before-send gate; desktop steps
+   still require Profile B foreground (else nudge).
+
+The planner never bypasses the routing rules — it orchestrates them.
+
 ## 7. Quick reference
 
 | Goal example | Route |

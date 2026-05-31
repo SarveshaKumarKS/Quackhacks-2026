@@ -17,7 +17,7 @@ sys.path.append(current_dir)
 sys.path.append(os.path.abspath(os.path.join(current_dir, "..")))
 
 from shared.contract import CommandModel, ObservationModel, MailNotificationModel
-from shared import routing, mcp_intent, web_intent
+from shared import routing, mcp_intent, web_intent, planner
 from shared.memory import MemoryStore
 import mcp_google
 
@@ -236,7 +236,7 @@ def _draft_email(client, goal: str, recipient_hint: str = "", revision: str = ""
         return {"to": recipient_hint or "", "subject": "", "body": response.text or ""}
 
 
-async def _handle_gmail(goal: str, client):
+async def _handle_gmail(goal: str, client, extra_context: str = "") -> str:
     """Draft an email, confirm with the user, and only then send (irreversible action)."""
     # Recall a prior recipient preference if we have one.
     recipient_hint = ""
@@ -246,6 +246,9 @@ async def _handle_gmail(goal: str, client):
             break
 
     memory_context = memory.recall_context(goal)
+    if extra_context:
+        memory_context = (memory_context + "\n\n" if memory_context else "") + \
+            "Context from earlier steps (use this in the email):\n" + extra_context
     revision = ""
     for _ in range(3):  # at most 3 draft/confirm rounds
         draft = await asyncio.to_thread(_draft_email, client, goal, recipient_hint, revision, memory_context)
@@ -272,66 +275,80 @@ async def _handle_gmail(goal: str, client):
         # Confirm-before-send: check decline FIRST so 'don't send' is never read as 'send'.
         if mcp_intent.is_negative(reply):
             log_message("[MCP/Gmail] User cancelled. Email NOT sent.")
-            return
+            return f"Email to {to} cancelled by user."
         if mcp_intent.is_affirmative(reply):
             ok = await asyncio.to_thread(mcp_google.send_gmail_message, to, subject, body)
             if ok:
                 log_message(f"[MCP/Gmail] Email sent to {to}.")
                 bq_save_memory("preference", f"client_details: {to}")
                 bq_save_memory("action_log", f"Sent email to {to} re: '{subject}'.")
-            else:
-                log_message("[MCP/Gmail] Gmail API send failed; draft saved locally as fallback.")
-            return
+                return f"Email sent to {to} (subject: {subject})."
+            log_message("[MCP/Gmail] Gmail API send failed; draft saved locally as fallback.")
+            return f"Gmail send failed for {to}; draft saved locally."
         # Anything else is treated as a revision instruction.
         revision = reply
         log_message(f"[MCP/Gmail] Revising draft per user instruction: '{revision}'")
 
     log_message("[MCP/Gmail] Reached max revision rounds without confirmation. Email NOT sent.")
+    return "Email not sent (max revision rounds reached)."
 
 
-async def _handle_calendar(goal: str):
+async def _handle_calendar(goal: str) -> str:
     """Read-only: fetch upcoming calendar events and report them back."""
     events = await asyncio.to_thread(mcp_google.check_google_calendar, 5)
     summary = mcp_intent.format_calendar_events(events)
     log_message(f"[MCP/Calendar] {summary}")
     agent_state.nudge_message = summary
     bq_save_memory("action_log", f"Checked calendar; {len(events)} upcoming events.")
+    return summary
 
 
-async def _handle_docs(goal: str, client):
-    """Generate content with Gemini and append it to the configured Google Doc."""
+async def _handle_docs(goal: str, client, extra_context: str = "") -> str:
+    """Append content to the Doc. If upstream context exists (e.g. a summary), append
+    that directly; otherwise generate fresh content from the goal."""
     doc_id = os.getenv("GOOGLE_DOC_ID")
-    resp = await asyncio.to_thread(
-        client.models.generate_content,
-        model='gemini-3-flash-preview',
-        contents=mcp_intent.build_doc_content_prompt(goal),
-    )
-    content = resp.text or ""
+    if extra_context:
+        content = extra_context
+    else:
+        resp = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-3-flash-preview',
+            contents=mcp_intent.build_doc_content_prompt(goal),
+        )
+        content = resp.text or ""
     if doc_id:
         ok = await asyncio.to_thread(mcp_google.append_to_google_doc, doc_id, f"\n\n{content}\n")
         log_message("[MCP/Docs] Appended content to Google Doc." if ok else "[MCP/Docs] Doc append failed.")
+        result = "Appended content to Google Doc." if ok else "Doc append failed."
     else:
         log_message("[MCP/Docs] No GOOGLE_DOC_ID configured; skipping append.")
+        result = "No GOOGLE_DOC_ID configured."
     bq_save_memory("action_log", f"Appended doc content for goal: '{goal}'.")
+    return result
 
 
-async def _handle_sheets(goal: str):
+async def _handle_sheets(goal: str, extra_context: str = "") -> str:
     """Append a tracking row to the configured Google Sheet."""
     sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if sheet_id:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [ts, "Manual MCP task", goal, "N/A", "Logged"]
+        detail = (extra_context[:120] if extra_context else goal)
+        row = [ts, "Manual MCP task", detail, "N/A", "Logged"]
         ok = await asyncio.to_thread(mcp_google.append_to_google_sheet, sheet_id, row)
         log_message("[MCP/Sheets] Appended row to Google Sheet." if ok else "[MCP/Sheets] Sheet append failed.")
+        result = "Appended row to Google Sheet." if ok else "Sheet append failed."
     else:
         log_message("[MCP/Sheets] No GOOGLE_SHEET_ID configured; skipping append.")
+        result = "No GOOGLE_SHEET_ID configured."
     bq_save_memory("action_log", f"Logged sheet row for goal: '{goal}'.")
+    return result
 
 
-async def handle_web_task(goal: str, client, agent_server_url: str):
+async def web_answer(goal: str, client, agent_server_url: str, extra_context: str = "") -> str:
     """
-    General web pipeline (ROUTING.md Tier 2): resolve the goal to a URL or search,
-    extract the page text headlessly via Chrome CDP, then have Gemini answer/summarize.
+    General web pipeline core (ROUTING.md Tier 2): resolve the goal to a URL or search,
+    extract page text headlessly via Chrome CDP, then have Gemini answer/summarize.
+    Returns the answer text (or "" on failure).
     """
     target = web_intent.build_target(goal)
     log_message(f"[Web] Handling web task: '{goal}' -> {target}")
@@ -344,26 +361,24 @@ async def handle_web_task(goal: str, client, agent_server_url: str):
             )
         except Exception as e:
             log_message(f"[!] Web extract request failed: {e}")
-            agent_state.status = "completed"
-            return
+            return ""
 
     if res.status_code != 200:
         log_message(f"[!] Web extract failed: HTTP {res.status_code}")
-        agent_state.status = "completed"
-        return
+        return ""
 
     result = res.json().get("result", {})
     text = result.get("text", "")
     if not text:
         log_message("[Web] No page text extracted; nothing to summarize.")
-        agent_state.status = "completed"
-        return
+        return ""
 
     log_message(f"[Web] Extracted {len(text)} chars from {result.get('page_url', target)}. Summarizing via Gemini...")
     web_prompt = web_intent.build_web_answer_prompt(goal, text)
     mem_context = memory.recall_context(goal)
-    if mem_context:
-        web_prompt = mem_context + "\n\n" + web_prompt
+    preamble = "\n\n".join(p for p in (mem_context, extra_context) if p)
+    if preamble:
+        web_prompt = preamble + "\n\n" + web_prompt
     resp = await asyncio.to_thread(
         client.models.generate_content,
         model='gemini-3-flash-preview',
@@ -371,8 +386,15 @@ async def handle_web_task(goal: str, client, agent_server_url: str):
     )
     answer = resp.text or ""
     log_message(f"[Web] Answer:\n{answer}")
-    agent_state.nudge_message = answer[:400]
     bq_save_memory("action_log", f"Web task answered: '{goal}'.")
+    return answer
+
+
+async def handle_web_task(goal: str, client, agent_server_url: str):
+    """Single-task entry point: run web_answer and surface the result in the UI."""
+    answer = await web_answer(goal, client, agent_server_url)
+    if answer:
+        agent_state.nudge_message = answer[:400]
     agent_state.status = "completed"
 
 
@@ -396,6 +418,198 @@ async def handle_mcp_task(goal: str, capability: Optional[str], client):
     except Exception as e:
         log_message(f"[!] MCP task failure: {e}")
     agent_state.status = "completed"
+
+
+async def reddit_summary(client, agent_server_url: str) -> str:
+    """Scrape the ML subreddit (CDP, with HN/cached fallback) and return a summary string.
+    Unlike the standalone shortcut, this does NOT write to Docs/Sheets — in a plan those
+    are separate steps that consume this summary as context."""
+    async with httpx.AsyncClient() as http_client:
+        try:
+            cmd = CommandModel(path="browser_use", action="read", args={})
+            res = await http_client.post(f"{agent_server_url}/command", json=cmd.model_dump(), timeout=30.0)
+            posts = res.json().get("result", {}).get("posts", []) if res.status_code == 200 else []
+        except Exception as e:
+            log_message(f"[Planner] Reddit scrape failed: {e}")
+            posts = []
+    if not posts:
+        return ""
+    summary_prompt = (
+        "Write a concise, professional digest of these top posts. "
+        "Use markdown with bold headings, bullets, and clean URLs:\n\n"
+    )
+    for idx, p in enumerate(posts, 1):
+        summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"
+    resp = await asyncio.to_thread(
+        client.models.generate_content, model='gemini-3-flash-preview', contents=summary_prompt
+    )
+    summary = resp.text or ""
+    log_message(f"[Planner] Reddit summary generated ({len(summary)} chars).")
+    return summary
+
+
+async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_steps: int = 8) -> str:
+    """Compact visual loop for a desktop sub-task within a plan (computer_use only).
+    Requires Profile B foreground; fails closed and nudges otherwise."""
+    log_message(f"[Planner/Desktop] Visual sub-task: '{task}'")
+    async with httpx.AsyncClient() as http_client:
+        for step in range(1, max_steps + 1):
+            try:
+                status_res = await http_client.get(f"{agent_server_url}/")
+                active = status_res.status_code == 200 and status_res.json().get("active_console", False)
+            except Exception:
+                active = False
+            if not active:
+                agent_state.nudge_message = "Please fast-user-switch to Profile B for the desktop step!"
+                agent_state.status = "waiting_for_user"
+                resume_event.clear()
+                await resume_event.wait()
+                agent_state.nudge_message = ""
+                agent_state.status = "working"
+
+            try:
+                frame = await http_client.get(f"{agent_server_url}/frame.jpg")
+                image_bytes = frame.content
+            except Exception as e:
+                log_message(f"[Planner/Desktop] Screenshot error: {e}")
+                await asyncio.sleep(1)
+                continue
+
+            sys_prompt = (
+                "You are the visual brain of Doppelgänger OS on a macOS screen (1440x900). "
+                f"Complete this sub-task: '{task}'. Output coordinate clicks, typing, keys, or "
+                "scroll to accomplish it. When the sub-task is finished, output action='completed'."
+            )
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model='gemini-3-flash-preview',
+                    contents=[types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'), sys_prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "thought": types.Schema(type=types.Type.STRING),
+                                "action": types.Schema(
+                                    type=types.Type.STRING,
+                                    enum=["click", "type", "key", "scroll", "noop", "completed"],
+                                ),
+                                "args": types.Schema(
+                                    type=types.Type.OBJECT,
+                                    properties={
+                                        "x": types.Schema(type=types.Type.INTEGER),
+                                        "y": types.Schema(type=types.Type.INTEGER),
+                                        "text": types.Schema(type=types.Type.STRING),
+                                        "key": types.Schema(type=types.Type.STRING),
+                                        "amount": types.Schema(type=types.Type.INTEGER),
+                                    },
+                                ),
+                            },
+                            required=["thought", "action"],
+                        ),
+                    ),
+                )
+                pred = json.loads(response.text)
+            except Exception as e:
+                log_message(f"[Planner/Desktop] Brain error: {e}")
+                break
+
+            action = pred.get("action", "noop")
+            args = pred.get("args", {})
+            log_message(f"[Planner/Desktop] {pred.get('thought','')} -> {action} {args}")
+            if action == "completed":
+                return f"Desktop sub-task done: {task}"
+
+            cmd = CommandModel(path="computer_use", action=action, args=args)
+            try:
+                cmd_res = await http_client.post(
+                    f"{agent_server_url}/command", json=cmd.model_dump(), timeout=15.0
+                )
+                if cmd_res.status_code == 200 and cmd_res.json().get("screen_state") == "background_lock":
+                    log_message("[Planner/Desktop] Background lock; will nudge to switch.")
+                    continue
+            except Exception as e:
+                log_message(f"[Planner/Desktop] Dispatch error: {e}")
+            await asyncio.sleep(1.5)
+    return f"Desktop sub-task ended (step budget reached): {task}"
+
+
+async def execute_plan_step(task: str, client, agent_server_url: str, context: str) -> str:
+    """Route and execute one plan step, returning its textual result for downstream steps."""
+    decision = routing.classify_goal(task)
+    log_message(f"[Planner] Routing step '{task}' -> {decision.route}/{decision.mcp_capability or '-'}")
+    if decision.route == "mcp":
+        cap = decision.mcp_capability
+        if cap == "gmail":
+            return await _handle_gmail(task, client, extra_context=context)
+        if cap == "calendar":
+            return await _handle_calendar(task)
+        if cap == "docs":
+            return await _handle_docs(task, client, extra_context=context)
+        if cap == "sheets":
+            return await _handle_sheets(task, extra_context=context)
+        return ""
+    if decision.route == "browser":
+        if routing.is_reddit_scrape_shortcut(task):
+            return await reddit_summary(client, agent_server_url)
+        return await web_answer(task, client, agent_server_url, extra_context=context)
+    return await _desktop_substep_loop(task, client, agent_server_url)
+
+
+async def run_task_plan(steps, client, agent_server_url: str):
+    """Execute an ordered plan, carrying each step's output forward as shared context."""
+    context = ""
+    for idx, task in enumerate(steps, 1):
+        agent_state.step_count = idx
+        log_message(f"[Planner] === Step {idx}/{len(steps)}: {task} ===")
+        try:
+            out = await execute_plan_step(task, client, agent_server_url, context)
+        except Exception as e:
+            log_message(f"[!] Plan step {idx} failed: {e}")
+            out = ""
+        if out:
+            context += f"\n\n[Result of step {idx} — {task}]:\n{out}"
+            memory.save("action_log", f"Plan step {idx} ({task}) -> {out[:120]}")
+    log_message("[Planner] Task plan complete.")
+    agent_state.nudge_message = "All steps complete."
+    agent_state.status = "completed"
+
+
+async def plan_tasks(goal: str, client) -> list:
+    """Decompose a compound goal into ordered sub-tasks (single-item list if simple)."""
+    if not planner.looks_compound(goal):
+        return [goal]
+    log_message("[Planner] Goal looks compound; decomposing via Gemini...")
+    try:
+        resp = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-3-flash-preview',
+            contents=planner.build_plan_prompt(goal),
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "steps": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(
+                                type=types.Type.OBJECT,
+                                properties={"task": types.Schema(type=types.Type.STRING)},
+                                required=["task"],
+                            ),
+                        )
+                    },
+                    required=["steps"],
+                ),
+            ),
+        )
+        data = json.loads(resp.text)
+        steps = planner.normalize_steps(data.get("steps", []))
+        return steps or [goal]
+    except Exception as e:
+        log_message(f"[Planner] Decomposition failed: {e}. Treating as single task.")
+        return [goal]
 
 
 async def run_computer_use_loop(goal: str):
@@ -449,6 +663,15 @@ async def run_computer_use_loop(goal: str):
                 log_message(f"[BigQuery] Recalled prior preference: '{client_pref}'")
                 break
                 
+    # Compound-task planner (Phase 6): decompose & sequence multi-step goals, carrying
+    # each step's output forward as shared context. Single-step goals fall through
+    # unchanged to the routing below.
+    plan = await plan_tasks(goal, client)
+    if len(plan) > 1:
+        log_message(f"[Planner] Decomposed into {len(plan)} steps: {plan}")
+        await run_task_plan(plan, client, agent_server_url)
+        return
+
     # MCP fast-path (ROUTING.md): API-backed goals (Docs/Sheets/Gmail/Calendar) are
     # handled directly and never touch the visual loop. MCP always wins.
     decision = routing.classify_goal(goal)
