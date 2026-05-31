@@ -410,25 +410,36 @@ async def run_computer_use_loop(goal: str):
                 log_message("[Confidence Gate] Loop detected! Terminating task to prevent resource exhaustion.")
                 break
                 
+            background_headless_hint = False
             # Safety Check: Proactively verify if Profile B is the active console GUI session
             try:
                 status_res = await http_client.get(f"{agent_server_url}/")
                 if status_res.status_code == 200:
                     status_data = status_res.json()
                     if not status_data.get("active_console", True):
-                        log_message("[Failsafe Active] Profile B is in the background! Proactively pausing visual computer use.")
-                        log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
+                        # Detect if the goal is a web/browser automation task
+                        is_web_task = any(kw in goal.lower() for kw in [
+                            "search", "google", "browser", "website", "url", "lookup", 
+                            "scrape", "reddit", "machine learning", "docs", "sheets", "email", "gmail", "inbox"
+                        ])
                         
-                        agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
-                        agent_state.status = "waiting_for_user"
-                        resume_event.clear()
-                        
-                        await resume_event.wait()
-                        agent_state.nudge_message = ""
-                        agent_state.status = "working"
-                        log_message("[Loop] Resuming visual computer use loop after user response.")
-                        # Re-evaluate the step after user switches profiles
-                        continue
+                        if is_web_task:
+                            log_message("[Failsafe] Profile B is in the background. Since this is a web task, running headlessly via Chrome CDP.")
+                            background_headless_hint = True
+                        else:
+                            log_message("[Failsafe Active] Profile B is in the background! Proactively pausing visual computer use.")
+                            log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
+                            
+                            agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
+                            agent_state.status = "waiting_for_user"
+                            resume_event.clear()
+                            
+                            await resume_event.wait()
+                            agent_state.nudge_message = ""
+                            agent_state.status = "working"
+                            log_message("[Loop] Resuming visual computer use loop after user response.")
+                            # Re-evaluate the step after user switches profiles
+                            continue
             except Exception as se:
                 log_message(f"[Warning] Failed to query active console status: {se}")
 
@@ -456,6 +467,15 @@ async def run_computer_use_loop(goal: str):
                 "Otherwise, interact with the screen elements (clicks, types, scroll, keys) to complete the goal.\n"
                 "If the goal has been achieved, select action='completed'."
             ).format(goal=goal)
+            
+            if background_headless_hint:
+                system_prompt += (
+                    "\n\nCRITICAL NOTIFICATION: Profile B is currently in the background. "
+                    "All global visual desktop actions (pyautogui clicks, types, keys) are STRICTLY BLOCKED. "
+                    "You MUST use the headless browser remote debugging pathway by outputting action='browser_use' "
+                    "and specifying Chrome CDP action arguments (navigate, click, type, scroll) in args. "
+                    "Do NOT try to click or type globally on the desktop screen. Proceed headlessly."
+                )
             
             log_message(f"[Step {step}] Analyzing screen via Gemini GenAI...")
             try:
@@ -486,7 +506,9 @@ async def run_computer_use_loop(goal: str):
                                         "x": types.Schema(type=types.Type.INTEGER, description="X coordinate (0-1440)"),
                                         "y": types.Schema(type=types.Type.INTEGER, description="Y coordinate (0-900)"),
                                         "text": types.Schema(type=types.Type.STRING, description="Text string to type"),
-                                        "key": types.Schema(type=types.Type.STRING, description="Special key name like 'enter', 'tab'")
+                                        "key": types.Schema(type=types.Type.STRING, description="Special key name like 'enter', 'tab'"),
+                                        "url": types.Schema(type=types.Type.STRING, description="URL string for browser navigation"),
+                                        "selector": types.Schema(type=types.Type.STRING, description="CSS selector for browser clicks/typing")
                                     }
                                 )
                             },
@@ -522,10 +544,21 @@ async def run_computer_use_loop(goal: str):
                     
                 # Handle browser_use pathway (GATE 5 & 6)
                 if action == "browser_use":
-                    log_message("[Browser Use] Dispatching r/MachineLearning scraper to agent-server...")
+                    browser_action = "read"
+                    if args.get("url"):
+                        browser_action = "navigate"
+                    elif args.get("text"):
+                        browser_action = "type"
+                    elif args.get("key"):
+                        browser_action = "key"
+                    elif args.get("selector") or (args.get("x") is not None and args.get("y") is not None):
+                        browser_action = "click"
+                        
+                    log_message(f"[Browser Use] Dispatching browser action '{browser_action}' with args {args} to agent-server...")
+                    
                     cmd_payload = CommandModel(
                         path="browser_use",
-                        action="read",
+                        action=browser_action,
                         args=args
                     )
                     
@@ -536,70 +569,76 @@ async def run_computer_use_loop(goal: str):
                     )
                     
                     if cmd_response.status_code != 200:
-                        log_message(f"[!] Scraper command failed: HTTP {cmd_response.status_code}")
+                        log_message(f"[!] Browser Use command failed: HTTP {cmd_response.status_code}")
                     else:
                         res_data = cmd_response.json()
-                        scrape_result = res_data.get("result", {})
-                        posts = scrape_result.get("posts", [])
-                        log_message(f"[Browser Use] Scrape successful! Found {len(posts)} posts.")
+                        result_info = res_data.get("result", {})
                         
-                        if posts:
-                            # 1. Summarize posts
-                            summary_prompt = (
-                                "Write a beautiful, highly professional and detailed newsletter-style digest summary "
-                                "of the following 3 hot Machine Learning posts. Use markdown formatting with clear bold headings, "
-                                "bulleted insights, and clean URLs:\n\n"
-                            )
-                            for idx, p in enumerate(posts, 1):
-                                summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"
+                        if browser_action == "read":
+                            posts = result_info.get("posts", [])
+                            log_message(f"[Browser Use] Scrape successful! Found {len(posts)} posts.")
+                            
+                            if posts:
+                                # 1. Summarize posts
+                                summary_prompt = (
+                                    "Write a beautiful, highly professional and detailed newsletter-style digest summary "
+                                    "of the following 3 hot Machine Learning posts. Use markdown formatting with clear bold headings, "
+                                    "bulleted insights, and clean URLs:\n\n"
+                                )
+                                for idx, p in enumerate(posts, 1):
+                                    summary_prompt += f"{idx}. Title: {p['title']}\n   Link: {p['url']}\n\n"
+                                    
+                                log_message("[Brain] Summarizing Reddit posts via Gemini...")
+                                sum_response = await asyncio.to_thread(
+                                    client.models.generate_content,
+                                    model='gemini-3-flash-preview',
+                                    contents=summary_prompt
+                                )
+                                summary_text = sum_response.text
+                                log_message(f"[Brain] Generated Summary:\n{summary_text}")
                                 
-                            log_message("[Brain] Summarizing Reddit posts via Gemini...")
-                            sum_response = await asyncio.to_thread(
-                                client.models.generate_content,
-                                model='gemini-3-flash-preview',
-                                contents=summary_prompt
-                            )
-                            summary_text = sum_response.text
-                            log_message(f"[Brain] Generated Summary:\n{summary_text}")
-                            
-                            # 2. Append to Google Doc
-                            doc_id = os.getenv("GOOGLE_DOC_ID")
-                            if doc_id:
-                                log_message(f"[Google Docs] Appending summary to Doc: {doc_id}...")
-                                success_doc = mcp_google.append_to_google_doc(doc_id, f"\n\n--- REDDIT MACHINE LEARNING DIGEST ---\n\n{summary_text}")
-                                if success_doc:
-                                    log_message("[Google Docs] Successfully synced to Cloud Document.")
-                                else:
-                                    log_message("[!] Google Docs sync failed.")
-                                    
-                            # 3. Append row to Google Sheet
-                            sheet_id = os.getenv("GOOGLE_SHEET_ID")
-                            if sheet_id:
-                                log_message(f"[Google Sheets] Appending log row to Sheet: {sheet_id}...")
-                                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                doc_link = f"https://docs.google.com/document/d/{doc_id}/edit" if doc_id else "N/A"
-                                row_values = [
-                                    timestamp, 
-                                    "Machine Learning Subreddit Research", 
-                                    f"Scraped {len(posts)} posts", 
-                                    doc_link, 
-                                    "Completed Successfully"
-                                ]
-                                success_sheet = mcp_google.append_to_google_sheet(sheet_id, row_values)
-                                if success_sheet:
-                                    log_message("[Google Sheets] Successfully synced log row.")
-                                else:
-                                    log_message("[!] Google Sheets sync failed.")
-                                    
-                            # 4. Save to BigQuery Memory table
-                            log_message("[BigQuery] Saving action log to memory table...")
-                            bq_save_memory(
-                                memory_type="action_log",
-                                content=f"Scraped r/MachineLearning. Top post: '{posts[0]['title']}'."
-                            )
-                            
-                    log_message("[x] Scraping, summarizing, and Cloud Doc/Sheet writing completed!")
-                    break
+                                # 2. Append to Google Doc
+                                doc_id = os.getenv("GOOGLE_DOC_ID")
+                                if doc_id:
+                                    log_message(f"[Google Docs] Appending summary to Doc: {doc_id}...")
+                                    success_doc = mcp_google.append_to_google_doc(doc_id, f"\n\n--- REDDIT MACHINE LEARNING DIGEST ---\n\n{summary_text}")
+                                    if success_doc:
+                                        log_message("[Google Docs] Successfully synced to Cloud Document.")
+                                    else:
+                                        log_message("[!] Google Docs sync failed.")
+                                        
+                                # 3. Append row to Google Sheet
+                                sheet_id = os.getenv("GOOGLE_SHEET_ID")
+                                if sheet_id:
+                                    log_message(f"[Google Sheets] Appending log row to Sheet: {sheet_id}...")
+                                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    doc_link = f"https://docs.google.com/document/d/{doc_id}/edit" if doc_id else "N/A"
+                                    row_values = [
+                                        timestamp, 
+                                        "Machine Learning Subreddit Research", 
+                                        f"Scraped {len(posts)} posts", 
+                                        doc_link, 
+                                        "Completed Successfully"
+                                    ]
+                                    success_sheet = mcp_google.append_to_google_sheet(sheet_id, row_values)
+                                    if success_sheet:
+                                        log_message("[Google Sheets] Successfully synced log row.")
+                                    else:
+                                        log_message("[!] Google Sheets sync failed.")
+                                        
+                                # 4. Save to BigQuery Memory table
+                                log_message("[BigQuery] Saving action log to memory table...")
+                                bq_save_memory(
+                                    memory_type="action_log",
+                                    content=f"Scraped r/MachineLearning. Top post: '{posts[0]['title']}'."
+                                )
+                                
+                            log_message("[x] Scraping, summarizing, and Cloud Doc/Sheet writing completed!")
+                            break
+                        else:
+                            detail = result_info.get("detail", "success")
+                            log_message(f"[Browser Use] Executed successfully: {detail}")
+                            continue
                     
                 # standard command dispatch to agent-server Port 8421
                 log_message(f"[Executor] Executing action '{action}' on Agent-Server...")

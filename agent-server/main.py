@@ -42,6 +42,7 @@ pyautogui.PAUSE = 0.05       # 50ms standard delay to mimic human input cadence
 app = FastAPI(title="Doppelgänger OS — Agent Server (Profile B)", version="1.1")
 
 _last_successful_frame = None
+_is_browser_active = False
 
 def is_profile_b_active_console() -> bool:
     """
@@ -115,12 +116,17 @@ def generate_background_failsafe_frame() -> bytes:
 def capture_screen_as_jpeg() -> bytes:
     """
     Captures the current active desktop screen of Profile B using Pillow/Quartz.
-    If Profile B is in the background, returns a beautiful secure failsafe placeholder.
+    If Profile B is in the background, returns a beautiful secure failsafe placeholder
+    unless headless background browser automation is active.
     """
-    global _last_successful_frame
+    global _last_successful_frame, _is_browser_active
     
-    # Safety Check: If Profile B is in the background, do not capture screen to protect Profile A
+    # Safety Check: If Profile B is in the background, protect Profile A screen
     if not is_profile_b_active_console():
+        # If we are actively running background browser automation and have a browser frame, return it!
+        if _is_browser_active and _last_successful_frame is not None:
+            return _last_successful_frame
+        # Otherwise, show the failsafe placeholder
         return generate_background_failsafe_frame()
         
     try:
@@ -320,6 +326,9 @@ async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]
     Automates Chrome running on Port 9222 via CDP using Playwright.
     Executes actions inside the browser session completely headlessly and in the background.
     """
+    global _is_browser_active
+    _is_browser_active = True
+    
     from playwright.async_api import async_playwright
     print(f"[Browser Use] Connecting to Chrome remote debugging on Port 9222 to run action '{action}'...")
     
@@ -439,6 +448,8 @@ async def execute_command(command: CommandModel):
         )
         
     if command.path == "computer_use" or command.path not in ("browser_use", "noop"):
+        global _is_browser_active
+        _is_browser_active = False
         # Safety Check: Block PyAutoGUI if Profile B is in the background
         if not is_profile_b_active_console():
             print("[Failsafe Active] Blocking PyAutoGUI action because Profile B is in the background.")
