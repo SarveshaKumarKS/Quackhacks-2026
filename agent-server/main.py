@@ -43,12 +43,86 @@ app = FastAPI(title="Doppelgänger OS — Agent Server (Profile B)", version="1.
 
 _last_successful_frame = None
 
+def is_profile_b_active_console() -> bool:
+    """
+    Checks if Profile B is the active console GUI session on macOS.
+    Returns True if this session is active on the console display,
+    False if another user profile is active (Fast User Switched) or screen is locked.
+    """
+    try:
+        import Quartz
+        session_dict = Quartz.CGSessionCopyCurrentDictionary()
+        if session_dict is None:
+            return False
+            
+        on_console = session_dict.get("kCGSSessionOnConsoleKey", 0) == 1
+        is_locked = session_dict.get("CGSSessionScreenIsLocked", 0) == 1
+        
+        return on_console and not is_locked
+    except Exception as e:
+        print(f"[Active Session Check] Failed to determine console state: {e}")
+        # Default to True so it doesn't block under unexpected non-macOS environments
+        return True
+
+def generate_background_failsafe_frame() -> bytes:
+    """
+    Generates a beautiful dark theme placeholder frame when Profile B is in the background,
+    informing the user that Active Console Protection (failsafe) is active.
+    """
+    from PIL import ImageDraw
+    img = Image.new("RGB", (1024, 768), color="#11111b") # Premium dark crust color
+    draw = ImageDraw.Draw(img)
+    
+    # Draw a decorative rounded rectangle in the center (glassmorphism/HUD card feel)
+    draw.rounded_rectangle(
+        [(150, 180), (874, 588)],
+        radius=20,
+        fill="#1e1e2e", # sleek dark card
+        outline="#313244", # subtle border
+        width=2
+    )
+    
+    # Header title
+    draw.text((200, 220), "DOPPELGANGER OS - SECURE SANDBOX", fill="#89b4fa") # Sky blue brand header
+    draw.text((200, 270), "Active Console Protection Guard (Failsafe Active)", fill="#f38ba8") # Pastel red alert
+    
+    # Context body text
+    body_lines = [
+        "The agent-server process is running in the background of Profile B.",
+        "Visual controls and desktop screen capture are temporarily suspended",
+        "to prevent hijacking your active Profile A workspace.",
+        "",
+        "Status:",
+        " - Screen Capture: BLOCKED (Failsafe Active)",
+        " - PyAutoGUI Inputs: BLOCKED (Failsafe Active)",
+        " - Chrome Remote Debugging (Port 9222): ACTIVE",
+        "",
+        "How to proceed:",
+        " 1. Web tasks: Use browser remote automation over Chrome CDP (Port 9222).",
+        "    This runs 100% in the background, fully isolated, without disrupting you.",
+        " 2. Desktop tasks: Trigger Fast User Switching to switch back to Profile B."
+    ]
+    
+    y = 310
+    for line in body_lines:
+        draw.text((200, y), line, fill="#cdd6f4") # Premium crisp off-white text
+        y += 20
+        
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG")
+    return buffer.getvalue()
+
 def capture_screen_as_jpeg() -> bytes:
     """
     Captures the current active desktop screen of Profile B using Pillow/Quartz.
-    Returns highly compressed JPEG bytes to optimize streaming bandwidth.
+    If Profile B is in the background, returns a beautiful secure failsafe placeholder.
     """
     global _last_successful_frame
+    
+    # Safety Check: If Profile B is in the background, do not capture screen to protect Profile A
+    if not is_profile_b_active_console():
+        return generate_background_failsafe_frame()
+        
     try:
         screenshot = ImageGrab.grab()
         # Convert RGBA/LA formats (which contain transparency/alpha channels) to standard RGB
@@ -74,7 +148,12 @@ def capture_screen_as_jpeg() -> bytes:
 
 @app.get("/")
 async def root():
-    return {"status": "online", "role": "agent-server", "port": 8421}
+    return {
+        "status": "online", 
+        "role": "agent-server", 
+        "port": 8421,
+        "active_console": is_profile_b_active_console()
+    }
 
 @app.get("/frame.jpg")
 async def get_frame():
@@ -236,6 +315,106 @@ async def scrape_reddit_ml() -> Dict[str, Any]:
         ]
         return {"success": True, "source": "cached_fallback", "posts": cached_posts}
 
+async def execute_browser_use_command(action: str, args: dict) -> Dict[str, Any]:
+    """
+    Automates Chrome running on Port 9222 via CDP using Playwright.
+    Executes actions inside the browser session completely headlessly and in the background.
+    """
+    from playwright.async_api import async_playwright
+    print(f"[Browser Use] Connecting to Chrome remote debugging on Port 9222 to run action '{action}'...")
+    
+    try:
+        async with async_playwright() as p:
+            browser = await asyncio.wait_for(
+                p.chromium.connect_over_cdp("http://127.0.0.1:9222"),
+                timeout=3.0
+            )
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            pages = context.pages
+            page = pages[0] if pages else await context.new_page()
+            
+            await page.set_viewport_size({"width": 1024, "height": 768})
+            result_detail = ""
+            
+            if action == "navigate":
+                url = args.get("url")
+                if not url:
+                    raise Exception("Navigate requires 'url' arg")
+                if not url.startswith("http://") and not url.startswith("https://"):
+                    url = f"https://{url}"
+                await page.goto(url, timeout=15000)
+                result_detail = f"Navigated to {url}"
+                
+            elif action == "click":
+                selector = args.get("selector")
+                x = args.get("x")
+                y = args.get("y")
+                
+                if selector:
+                    await page.click(selector, timeout=5000)
+                    result_detail = f"Clicked element matching '{selector}'"
+                elif x is not None and y is not None:
+                    x_vp = int(x * (1024 / 1440))
+                    y_vp = int(y * (768 / 900))
+                    await page.mouse.click(x_vp, y_vp)
+                    result_detail = f"Clicked at viewport coordinates ({x_vp}, {y_vp})"
+                else:
+                    raise Exception("Click requires either 'selector' or 'x' and 'y'")
+                    
+            elif action == "type":
+                text = args.get("text")
+                if text is None:
+                    raise Exception("Type requires 'text' arg")
+                
+                selector = args.get("selector")
+                x = args.get("x")
+                y = args.get("y")
+                if selector:
+                    await page.click(selector)
+                elif x is not None and y is not None:
+                    x_vp = int(x * (1024 / 1440))
+                    y_vp = int(y * (768 / 900))
+                    await page.mouse.click(x_vp, y_vp)
+                    
+                await page.keyboard.type(text)
+                result_detail = f"Typed text"
+                
+            elif action == "key":
+                key = args.get("key")
+                if not key:
+                    raise Exception("Key requires 'key' arg")
+                await page.keyboard.press(key)
+                result_detail = f"Pressed key '{key}'"
+                
+            elif action == "scroll":
+                amount = args.get("amount", 200)
+                await page.evaluate(f"window.scrollBy(0, {amount})")
+                result_detail = f"Scrolled by {amount} pixels"
+                
+            elif action == "read":
+                return await scrape_reddit_ml()
+                
+            elif action == "screenshot":
+                result_detail = "Captured browser screenshot"
+                
+            else:
+                raise Exception(f"Unsupported browser action: {action}")
+                
+            # Capture viewport frame and update last frame buffer
+            try:
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=60)
+                global _last_successful_frame
+                _last_successful_frame = screenshot_bytes
+            except Exception as se:
+                print(f"[Warning] Failed to update frame after action: {se}")
+                
+            await browser.close()
+            return {"success": True, "detail": result_detail}
+            
+    except Exception as e:
+        print(f"[!] Browser Use execution failure: {e}")
+        return {"success": False, "error_message": str(e)}
+
 @app.post("/command")
 async def execute_command(command: CommandModel):
     """
@@ -245,11 +424,11 @@ async def execute_command(command: CommandModel):
     print(f"[*] Command received: path={command.path}, action={command.action}, args={command.args}")
     
     if command.path == "browser_use":
-        scrape_result = await scrape_reddit_ml()
+        browser_result = await execute_browser_use_command(command.action, command.args)
         return ObservationModel(
             screenshot_url="http://localhost:8421/frame.jpg",
-            screen_state="ok" if scrape_result["success"] else "error",
-            result=scrape_result
+            screen_state="ok" if browser_result["success"] else "error",
+            result=browser_result
         )
         
     if command.path == "noop":
@@ -258,6 +437,19 @@ async def execute_command(command: CommandModel):
             screen_state="ok",
             result={"success": True, "detail": "noop completed"}
         )
+        
+    if command.path == "computer_use" or command.path not in ("browser_use", "noop"):
+        # Safety Check: Block PyAutoGUI if Profile B is in the background
+        if not is_profile_b_active_console():
+            print("[Failsafe Active] Blocking PyAutoGUI action because Profile B is in the background.")
+            return ObservationModel(
+                screenshot_url="http://localhost:8421/frame.jpg",
+                screen_state="background_lock",
+                result={
+                    "success": False, 
+                    "error_message": "Failsafe Active: Profile B is in the background. Visual desktop control is blocked to protect your workspace."
+                }
+            )
         
     action = command.action
     args = command.args

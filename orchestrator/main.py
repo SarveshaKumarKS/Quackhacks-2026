@@ -410,6 +410,28 @@ async def run_computer_use_loop(goal: str):
                 log_message("[Confidence Gate] Loop detected! Terminating task to prevent resource exhaustion.")
                 break
                 
+            # Safety Check: Proactively verify if Profile B is the active console GUI session
+            try:
+                status_res = await http_client.get(f"{agent_server_url}/")
+                if status_res.status_code == 200:
+                    status_data = status_res.json()
+                    if not status_data.get("active_console", True):
+                        log_message("[Failsafe Active] Profile B is in the background! Proactively pausing visual computer use.")
+                        log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
+                        
+                        agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
+                        agent_state.status = "waiting_for_user"
+                        resume_event.clear()
+                        
+                        await resume_event.wait()
+                        agent_state.nudge_message = ""
+                        agent_state.status = "working"
+                        log_message("[Loop] Resuming visual computer use loop after user response.")
+                        # Re-evaluate the step after user switches profiles
+                        continue
+            except Exception as se:
+                log_message(f"[Warning] Failed to query active console status: {se}")
+
             log_message(f"[Step {step}] Grabbing screenshot from Agent-Server...")
             
             # Capture Screenshot
@@ -597,6 +619,21 @@ async def run_computer_use_loop(goal: str):
                     log_message(f"[!] Command post failed: HTTP {cmd_response.status_code}")
                 else:
                     res_data = cmd_response.json()
+                    screen_state = res_data.get("screen_state")
+                    if screen_state == "background_lock":
+                        log_message("[Failsafe Active] Profile B is in the background! Visual computer use is blocked.")
+                        log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
+                        
+                        agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
+                        agent_state.status = "waiting_for_user"
+                        resume_event.clear()
+                        
+                        await resume_event.wait()
+                        agent_state.nudge_message = ""
+                        agent_state.status = "working"
+                        log_message("[Loop] Resuming visual computer use loop after user response.")
+                        continue
+                        
                     log_message(f"[Executor] Command result: {res_data.get('result', {}).get('detail', 'done')}")
                     
             except Exception as e:
