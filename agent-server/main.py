@@ -516,6 +516,36 @@ def _open_app(args: Dict[str, Any]) -> ObservationModel:
         )
 
 
+def _run_applescript(args: Dict[str, Any]) -> ObservationModel:
+    """Run an AppleScript in Profile B's session via `osascript`. Session-safe: Apple
+    Events are addressed to specific apps in THIS login session (B), so they act on B and
+    never hijack Profile A. Intended for app-native scripting (tell application "Notes"…),
+    not System Events keystroke/UI clicking. Returns the script's output."""
+    script = (args.get("script") or "").strip()
+    if not script:
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg", screen_state="error",
+            result={"success": False, "error_message": "run_applescript requires a 'script'"},
+        )
+    try:
+        result = subprocess.run(["osascript", "-"], input=script,
+                                capture_output=True, text=True, timeout=20)
+        ok = result.returncode == 0
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        print(f"[AppleScript] {'ok' if ok else 'error'}: {out or err}")
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg",
+            screen_state="ok" if ok else "error",
+            result={"success": ok, "detail": (out if ok else err), "output": out},
+        )
+    except Exception as e:
+        return ObservationModel(
+            screenshot_url="http://localhost:8421/frame.jpg", screen_state="error",
+            result={"success": False, "error_message": str(e)},
+        )
+
+
 @app.post("/command")
 async def execute_command(command: CommandModel):
     """
@@ -524,10 +554,12 @@ async def execute_command(command: CommandModel):
     """
     print(f"[*] Command received: path={command.path}, action={command.action}, args={command.args}")
 
-    # Session-safe app launch — bypasses the pixel failsafe because LaunchServices runs
-    # in B's own session and never touches Profile A.
+    # Session-safe system actions — bypass the pixel failsafe because they run in B's own
+    # session (LaunchServices / Apple Events) and never touch Profile A.
     if command.action == "open_app":
         return _open_app(command.args)
+    if command.action == "run_applescript":
+        return _run_applescript(command.args)
     
     if command.path == "browser_use":
         browser_result = await execute_browser_use_command(command.action, command.args)

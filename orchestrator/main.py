@@ -562,6 +562,57 @@ async def dispatch_open_app(app: str, agent_server_url: str) -> str:
     return f"Could not open {app}: {detail}"
 
 
+async def applescript_for_goal(goal: str, client, agent_server_url: str):
+    """Generate an app-native AppleScript for an in-app goal and run it in B's session
+    (session-safe — Apple Events, never hijacks A). Returns the script output (str) if a
+    script ran, or None if no safe script applies (caller may fall back to the pixel loop)."""
+    prompt = (
+        "Write a macOS AppleScript that accomplishes the request below. Use APP-NATIVE "
+        "scripting ONLY (e.g. tell application \"Notes\" / \"Safari\" / \"Finder\" / \"Music\" / "
+        "\"System Settings\"). Do NOT use System Events keystroke or UI-element clicking. "
+        "If the script should produce a result, make the last statement return it. "
+        "If the request cannot be done with app-native AppleScript, return an EMPTY script.\n\n"
+        f"Request: {goal}"
+    )
+    try:
+        resp = await asyncio.to_thread(
+            client.models.generate_content, model='gemini-3-flash-preview', contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=types.Schema(type=types.Type.OBJECT, properties={
+                    "script": types.Schema(type=types.Type.STRING),
+                    "explanation": types.Schema(type=types.Type.STRING),
+                }, required=["script"]),
+            ),
+        )
+        data = json.loads(resp.text)
+    except Exception as e:
+        log_message(f"[Automation] AppleScript generation failed: {e}")
+        return None
+    script = (data.get("script") or "").strip()
+    if not script:
+        log_message("[Automation] No app-native AppleScript applies to this goal.")
+        return None
+    log_message(f"[Automation] Generated AppleScript:\n{script}")
+    cmd = CommandModel(path="computer_use", action="run_applescript", args={"script": script})
+    result = {}
+    async with httpx.AsyncClient() as http_client:
+        try:
+            res = await http_client.post(f"{agent_server_url}/command", json=cmd.model_dump(), timeout=30.0)
+            if res.status_code == 200:
+                result = res.json().get("result", {})
+        except Exception as e:
+            log_message(f"[!] AppleScript dispatch failed: {e}")
+            return f"AppleScript dispatch failed: {e}"
+    ok = result.get("success")
+    detail = result.get("detail", "")
+    log_message(f"[Automation] {'OK' if ok else 'Error'}: {detail}")
+    if ok:
+        bq_save_memory("action_log", f"AppleScript ran for goal: '{goal}'.")
+        return detail or "done"
+    return f"AppleScript error: {detail}"
+
+
 async def execute_plan_step(task: str, client, agent_server_url: str, context: str) -> str:
     """Route and execute one plan step, returning its textual result for downstream steps."""
     decision = routing.classify_goal(task)
@@ -581,10 +632,14 @@ async def execute_plan_step(task: str, client, agent_server_url: str, context: s
         if routing.is_reddit_scrape_shortcut(task):
             return await reddit_summary(client, agent_server_url)
         return await web_answer(task, client, agent_server_url, extra_context=context)
-    # desktop: prefer the session-safe open_app for app launches; pixels otherwise.
+    # desktop: prefer session-safe actions — open_app for launches, AppleScript for
+    # in-app automation; fall back to the foreground pixel loop only if neither applies.
     app = routing.parse_app_launch(task)
     if app:
         return await dispatch_open_app(app, agent_server_url)
+    out = await applescript_for_goal(task, client, agent_server_url)
+    if out is not None:
+        return out
     return await _desktop_substep_loop(task, client, agent_server_url)
 
 
@@ -836,6 +891,15 @@ async def run_computer_use_loop(goal: str):
         await dispatch_open_app(app, agent_server_url)
         agent_state.status = "completed"
         return
+
+    # In-app automation via session-safe AppleScript (pixels are fail-closed in the
+    # background). Falls through to the foreground pixel loop only if no script applies.
+    if decision.route == "desktop":
+        out = await applescript_for_goal(goal, client, agent_server_url)
+        if out is not None:
+            agent_state.nudge_message = (out or "")[:300]
+            agent_state.status = "completed"
+            return
 
     loop_memory_context = memory.recall_context(goal)
     max_steps = 15
