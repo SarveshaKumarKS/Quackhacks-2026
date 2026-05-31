@@ -70,6 +70,14 @@ class TestRouting(unittest.TestCase):
             self.assertEqual(cmd.path, "mcp")
             self.assertEqual(cmd.action, action)
 
+    def test_observation_accepts_background_lock(self):
+        # Regression: the failsafe returns screen_state='background_lock'. If the
+        # contract rejects it, the agent-server 500s exactly when B is backgrounded.
+        from contract import ObservationModel
+        obs = ObservationModel(screen_state="background_lock",
+                               result={"success": False, "error_message": "blocked"})
+        self.assertEqual(obs.screen_state, "background_lock")
+
 
 if __name__ == "__main__":
     unittest.main()

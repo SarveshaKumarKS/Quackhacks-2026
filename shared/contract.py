@@ -36,9 +36,10 @@ class ObservationModel(BaseModel):
         None,
         description="URL to retrieve the latest full screen frame (usually http://localhost:8421/frame.jpg)."
     )
-    screen_state: Literal["ok", "modal", "error", "stuck"] = Field(
+    screen_state: Literal["ok", "modal", "error", "stuck", "background_lock"] = Field(
         "ok",
-        description="Indicates vision safety state to trigger the stuck-detector."
+        description="Vision/safety state. 'background_lock' means Profile B is backgrounded "
+                    "and desktop control was refused by the Active Console Protection failsafe."
     )
     result: Dict[str, Any] = Field(
         default_factory=dict,
