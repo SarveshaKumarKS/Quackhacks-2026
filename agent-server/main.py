@@ -67,6 +67,23 @@ def is_profile_b_active_console() -> bool:
         # global screen capture to run against Profile A. See ROUTING.md §4.
         return False
 
+
+def vnc_supervised() -> bool:
+    """
+    Operator opt-in (default OFF): Profile B is being supervised over VNC with a live
+    virtual display, so desktop control + capture are intentionally permitted even when
+    B is not the physical-console foreground. See docs/VNC_INTEGRATION.md §4.
+    Setting this is a conscious assertion that the agent only ever acts on B's session.
+    """
+    return os.getenv("VNC_SUPERVISED_MODE", "false").lower() == "true"
+
+
+def desktop_control_allowed() -> bool:
+    """Desktop control/capture is allowed if B is the physical foreground console OR
+    B is explicitly running in VNC-supervised mode. Default (flag unset) is identical
+    fail-closed behavior to is_profile_b_active_console()."""
+    return is_profile_b_active_console() or vnc_supervised()
+
 def generate_background_failsafe_frame() -> bytes:
     """
     Generates a beautiful dark theme placeholder frame when Profile B is in the background,
@@ -123,8 +140,10 @@ def capture_screen_as_jpeg() -> bytes:
     """
     global _last_successful_frame, _is_browser_active
     
-    # Safety Check: If Profile B is in the background, protect Profile A screen
-    if not is_profile_b_active_console():
+    # Safety Check: If Profile B is in the background (and NOT VNC-supervised), protect
+    # Profile A's screen. In VNC mode B has its own virtual display, so real capture of
+    # B's session is intended.
+    if not desktop_control_allowed():
         # If we are actively running background browser automation and have a browser frame, return it!
         if _is_browser_active and _last_successful_frame is not None:
             return _last_successful_frame
@@ -157,10 +176,12 @@ def capture_screen_as_jpeg() -> bytes:
 @app.get("/")
 async def root():
     return {
-        "status": "online", 
-        "role": "agent-server", 
+        "status": "online",
+        "role": "agent-server",
         "port": 8421,
-        "active_console": is_profile_b_active_console()
+        "active_console": is_profile_b_active_console(),  # truthful physical-console state
+        "vnc_supervised": vnc_supervised(),
+        "control_allowed": desktop_control_allowed(),     # what the orchestrator should gate on
     }
 
 @app.get("/frame.jpg")
@@ -471,8 +492,8 @@ async def execute_command(command: CommandModel):
     if command.path == "computer_use" or command.path not in ("browser_use", "noop"):
         global _is_browser_active
         _is_browser_active = False
-        # Safety Check: Block PyAutoGUI if Profile B is in the background
-        if not is_profile_b_active_console():
+        # Safety Check: Block PyAutoGUI if Profile B is in the background AND not VNC-supervised.
+        if not desktop_control_allowed():
             print("[Failsafe Active] Blocking PyAutoGUI action because Profile B is in the background.")
             return ObservationModel(
                 screenshot_url="http://localhost:8421/frame.jpg",

@@ -814,9 +814,13 @@ async def run_computer_use_loop(goal: str):
                 status_res = await http_client.get(f"{agent_server_url}/")
                 if status_res.status_code == 200:
                     status_data = status_res.json()
-                    # FAIL CLOSED: missing/unknown active_console is treated as background
-                    # so desktop computer_use is never attempted on an unverified session.
-                    if not status_data.get("active_console", False):
+                    # FAIL CLOSED: unknown control state is treated as no-control. In
+                    # VNC-supervised mode the agent-server reports control_allowed=true even
+                    # when not the physical console (see docs/VNC_INTEGRATION.md §4).
+                    control_allowed = status_data.get(
+                        "control_allowed", status_data.get("active_console", False)
+                    )
+                    if not control_allowed:
                         # Single classifier decides routing (ROUTING.md §5). Desktop route
                         # needs the foreground console -> nudge. mcp/browser routes are
                         # profile-independent -> proceed headlessly without switching.
