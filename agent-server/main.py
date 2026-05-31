@@ -166,13 +166,14 @@ def capture_screen_as_jpeg() -> bytes:
     """
     global _last_successful_frame, _is_browser_active
     
-    # Safety Check: If Profile B is in the background, protect Profile A's screen.
-    if not is_profile_b_active_console():
-        # If we are actively running background browser automation and have a browser frame, return it!
-        if _is_browser_active and _last_successful_frame is not None:
-            return _last_successful_frame
-        # Otherwise, show the failsafe placeholder
-        return generate_background_failsafe_frame()
+    # Capture is SESSION-CORRECT: ImageGrab in this process captures THIS login session
+    # (Profile B), NOT the foreground — verified by running it inside B's session. So
+    # streaming B's own screen to the PiP is safe even when B is backgrounded.
+    # (Pixel INPUT is the opposite — the HID tap targets the foreground — so computer_use
+    # stays fail-closed; only capture is allowed in the background.)
+    # During headless browser automation, prefer the captured browser viewport frame.
+    if _is_browser_active and _last_successful_frame is not None:
+        return _last_successful_frame
         
     try:
         screenshot = ImageGrab.grab()
@@ -191,11 +192,8 @@ def capture_screen_as_jpeg() -> bytes:
         # Return the last successful frame to avoid screen flickering
         if _last_successful_frame is not None:
             return _last_successful_frame
-        # Return a solid black placeholder frame if background session is asleep/locked and no cache exists
-        black_placeholder = Image.new("RGB", (1024, 768), color="black")
-        buffer = io.BytesIO()
-        black_placeholder.save(buffer, format="JPEG")
-        return buffer.getvalue()
+        # B's session is asleep/suspended (nothing to capture) -> show the placeholder.
+        return generate_background_failsafe_frame()
 
 @app.get("/")
 async def root():

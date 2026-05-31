@@ -81,14 +81,18 @@ of which login session the process runs in. So the agent's clicks/keys landed in
 The original `is_profile_b_active_console()` gate was **correct**; bypassing it re-enabled
 exactly the hijack it existed to prevent.
 
-> **Both capture AND input target the foreground (verified).** `ImageGrab` /
-> `CGWindowListCreateImage` from B's backgrounded session captures **Profile A's** screen
-> (the main display), not B's — just like `pyautogui` input lands on A. So the MJPEG
-> capture pipeline **cannot** show B's screen and must stay fail-closed (showing it would
-> leak A). The **only** way to view B's actual session is the **VNC server**
-> (`screensharingd` / Vine Server), which has the privilege to render and serve B's
-> *virtual display* independent of the main display. Capture stays fail-closed; "see B"
-> means the VNC channel, not screen-grab.
+> **The asymmetry is real (re-verified carefully): capture → B, input → A.**
+> `ImageGrab` / `CGWindowListCreateImage` run *inside B's session* capture **B's** screen
+> (session-correct) — confirmed by running the grab in B's own Terminal. (An earlier test
+> that "showed A" had been run in *Profile A's* terminal by mistake.) `pyautogui` input,
+> by contrast, posts via the **HID event tap → the foreground (A)**. So:
+> - **Screen capture is safe** to stream from B even when backgrounded → the MJPEG PiP can
+>   show B's live screen. (`computer_use` capture gate re-opened.)
+> - **Pixel input stays fail-closed** — it would hijack A.
+>
+> This also explains the original hijack: the agent *saw B correctly* but its *clicks went
+> to A*. Note: B must be **rendering** for capture to have content — keep a VNC session
+> connected, or attach a virtual/dummy display, or B's session may suspend.
 
 **Resolution:** `VNC_SUPERVISED_MODE` and `desktop_control_allowed()` were **removed**.
 Pixel `computer_use` is permanently fail-closed (blocked unless B is the physical console).
