@@ -195,20 +195,21 @@ struct ContentView: View {
                         .buttonStyle(PlainButtonStyle())
                         
                         // Editable Input Field (Edit-Before-Send Guardrail)
-                        TextField(speechManager.isRecording ? "Listening..." : "Tell the twin what to do...", text: $promptText, onCommit: {
-                            sendInstruction()
-                        })
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .font(.system(size: 11, weight: .regular, design: .rounded))
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(Color.black.opacity(0.3))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                        )
-                        .foregroundColor(.white)
+                        TextField(speechManager.isRecording ? "Listening..." : "Tell the twin what to do...", text: $promptText, axis: .vertical)
+                            .lineLimit(1...5)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(minHeight: 28)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            )
+                            .foregroundColor(.white)
+                            .onSubmit { sendInstruction() }
                         
                         // Submit instruction button
                         Button(action: sendInstruction) {
