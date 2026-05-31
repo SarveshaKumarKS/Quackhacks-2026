@@ -17,6 +17,8 @@ sys.path.append(current_dir)
 sys.path.append(os.path.abspath(os.path.join(current_dir, "..")))
 
 from shared.contract import CommandModel, ObservationModel, MailNotificationModel
+from shared import routing, mcp_intent, web_intent
+from shared.memory import MemoryStore
 import mcp_google
 
 def load_env():
@@ -39,6 +41,9 @@ def load_env():
                     os.environ[key.strip()] = val
 
 load_env()
+
+# Local-first agent memory (BigQuery mirror when GCP_PROJECT_ID is set).
+memory = MemoryStore()
 
 # Zero-configuration auto-initialization for Google Workspace Docs/Sheets
 def auto_init_google_docs():
@@ -94,62 +99,12 @@ auto_init_google_docs()
 
 # BigQuery memory write-through & read-local loop functions
 def bq_save_memory(memory_type: str, content: str, session_id: str = "doppelganger_session"):
-    """
-    Saves a memory record to BigQuery. Fallback to local memory on any error.
-    """
-    project_id = os.getenv("GCP_PROJECT_ID")
-    if not project_id:
-        print("[BQ Fallback] GCP_PROJECT_ID missing, saving locally.")
-        return
-    try:
-        from google.cloud import bigquery
-        import random
-        client = bigquery.Client(project=project_id)
-        table_ref = f"{project_id}.doppelganger_dataset.agent_memory"
-        
-        mem_id = int(datetime.datetime.now().timestamp() * 1000) + random.randint(0, 999)
-        row_to_insert = {
-            "id": mem_id,
-            "session_id": session_id,
-            "memory_type": memory_type,
-            "content": content,
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
-        }
-        
-        errors = client.insert_rows_json(table_ref, [row_to_insert])
-        if errors:
-            print(f"[!] BQ insert errors: {errors}")
-        else:
-            print(f"[x] Successfully saved memory to BigQuery table: {memory_type}")
-    except Exception as e:
-        print(f"[!] BQ save exception: {e}")
+    """Persist a memory locally (always) and mirror to BigQuery when configured."""
+    memory.save(memory_type, content, session_id)
 
 def bq_get_memory(memory_type: str, session_id: str = "doppelganger_session") -> List[str]:
-    """
-    Retrieves memory records of a given type from BigQuery.
-    """
-    project_id = os.getenv("GCP_PROJECT_ID")
-    if not project_id:
-        return []
-    try:
-        from google.cloud import bigquery
-        client = bigquery.Client(project=project_id)
-        query = f"""
-            SELECT content FROM `{project_id}.doppelganger_dataset.agent_memory`
-            WHERE memory_type = @mem_type
-            ORDER BY created_at DESC
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("mem_type", "STRING", memory_type)
-            ]
-        )
-        query_job = client.query(query, job_config=job_config)
-        results = query_job.result()
-        return [row.content for row in results]
-    except Exception as e:
-        print(f"[!] BQ get exception: {e}")
-        return []
+    """Recall memories of a given type, most-recent-first (local-first)."""
+    return memory.recall_contents(memory_type=memory_type)
 
 app = FastAPI(title="Doppelgänger OS — Orchestrator Backend", version="2.1")
 
@@ -239,6 +194,210 @@ def log_message(text: str):
     except Exception as e:
         pass
 
+async def _await_user_reply(prompt_text: str) -> str:
+    """
+    Park the loop, surface a nudge in the Notch UI, and block until the user
+    replies via POST /instruction. Returns the user's reply text.
+    """
+    global user_response_value
+    agent_state.nudge_message = prompt_text
+    agent_state.status = "waiting_for_user"
+    resume_event.clear()
+    await resume_event.wait()
+    reply = user_response_value
+    agent_state.status = "working"
+    agent_state.nudge_message = ""
+    return reply
+
+
+def _draft_email(client, goal: str, recipient_hint: str = "", revision: str = "",
+                 memory_context: str = "") -> Dict[str, Any]:
+    """Synchronous Gemini call producing a structured {to, subject, body} draft."""
+    prompt = mcp_intent.build_email_draft_prompt(goal, recipient_hint, revision, memory_context)
+    response = client.models.generate_content(
+        model='gemini-3-flash-preview',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "to": types.Schema(type=types.Type.STRING, description="Recipient email address"),
+                    "subject": types.Schema(type=types.Type.STRING, description="Email subject line"),
+                    "body": types.Schema(type=types.Type.STRING, description="Email body text"),
+                },
+                required=["to", "subject", "body"],
+            ),
+        ),
+    )
+    try:
+        return json.loads(response.text)
+    except Exception:
+        return {"to": recipient_hint or "", "subject": "", "body": response.text or ""}
+
+
+async def _handle_gmail(goal: str, client):
+    """Draft an email, confirm with the user, and only then send (irreversible action)."""
+    # Recall a prior recipient preference if we have one.
+    recipient_hint = ""
+    for pref in bq_get_memory("preference"):
+        if "client_details" in pref:
+            recipient_hint = pref.replace("client_details:", "").strip()
+            break
+
+    memory_context = memory.recall_context(goal)
+    revision = ""
+    for _ in range(3):  # at most 3 draft/confirm rounds
+        draft = await asyncio.to_thread(_draft_email, client, goal, recipient_hint, revision, memory_context)
+        to = (draft.get("to") or "").strip()
+        subject = draft.get("subject", "")
+        body = draft.get("body", "")
+
+        # Need a valid recipient before we can present a sendable draft.
+        if "@" not in to:
+            reply = await _await_user_reply(
+                f"Who should I email? I couldn't find a recipient for: '{goal}'"
+            )
+            recipient_hint = reply.strip()
+            revision = ""
+            continue
+
+        preview = (
+            f"Draft email\nTo: {to}\nSubject: {subject}\n\n{body}\n\n"
+            "Reply 'yes' to send, 'no' to cancel, or tell me what to change."
+        )
+        log_message(f"[MCP/Gmail] Presenting draft for confirmation:\n{preview}")
+        reply = await _await_user_reply(preview)
+
+        # Confirm-before-send: check decline FIRST so 'don't send' is never read as 'send'.
+        if mcp_intent.is_negative(reply):
+            log_message("[MCP/Gmail] User cancelled. Email NOT sent.")
+            return
+        if mcp_intent.is_affirmative(reply):
+            ok = await asyncio.to_thread(mcp_google.send_gmail_message, to, subject, body)
+            if ok:
+                log_message(f"[MCP/Gmail] Email sent to {to}.")
+                bq_save_memory("preference", f"client_details: {to}")
+                bq_save_memory("action_log", f"Sent email to {to} re: '{subject}'.")
+            else:
+                log_message("[MCP/Gmail] Gmail API send failed; draft saved locally as fallback.")
+            return
+        # Anything else is treated as a revision instruction.
+        revision = reply
+        log_message(f"[MCP/Gmail] Revising draft per user instruction: '{revision}'")
+
+    log_message("[MCP/Gmail] Reached max revision rounds without confirmation. Email NOT sent.")
+
+
+async def _handle_calendar(goal: str):
+    """Read-only: fetch upcoming calendar events and report them back."""
+    events = await asyncio.to_thread(mcp_google.check_google_calendar, 5)
+    summary = mcp_intent.format_calendar_events(events)
+    log_message(f"[MCP/Calendar] {summary}")
+    agent_state.nudge_message = summary
+    bq_save_memory("action_log", f"Checked calendar; {len(events)} upcoming events.")
+
+
+async def _handle_docs(goal: str, client):
+    """Generate content with Gemini and append it to the configured Google Doc."""
+    doc_id = os.getenv("GOOGLE_DOC_ID")
+    resp = await asyncio.to_thread(
+        client.models.generate_content,
+        model='gemini-3-flash-preview',
+        contents=mcp_intent.build_doc_content_prompt(goal),
+    )
+    content = resp.text or ""
+    if doc_id:
+        ok = await asyncio.to_thread(mcp_google.append_to_google_doc, doc_id, f"\n\n{content}\n")
+        log_message("[MCP/Docs] Appended content to Google Doc." if ok else "[MCP/Docs] Doc append failed.")
+    else:
+        log_message("[MCP/Docs] No GOOGLE_DOC_ID configured; skipping append.")
+    bq_save_memory("action_log", f"Appended doc content for goal: '{goal}'.")
+
+
+async def _handle_sheets(goal: str):
+    """Append a tracking row to the configured Google Sheet."""
+    sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if sheet_id:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = [ts, "Manual MCP task", goal, "N/A", "Logged"]
+        ok = await asyncio.to_thread(mcp_google.append_to_google_sheet, sheet_id, row)
+        log_message("[MCP/Sheets] Appended row to Google Sheet." if ok else "[MCP/Sheets] Sheet append failed.")
+    else:
+        log_message("[MCP/Sheets] No GOOGLE_SHEET_ID configured; skipping append.")
+    bq_save_memory("action_log", f"Logged sheet row for goal: '{goal}'.")
+
+
+async def handle_web_task(goal: str, client, agent_server_url: str):
+    """
+    General web pipeline (ROUTING.md Tier 2): resolve the goal to a URL or search,
+    extract the page text headlessly via Chrome CDP, then have Gemini answer/summarize.
+    """
+    target = web_intent.build_target(goal)
+    log_message(f"[Web] Handling web task: '{goal}' -> {target}")
+
+    cmd = CommandModel(path="browser_use", action="extract", args={"url": target})
+    async with httpx.AsyncClient() as http_client:
+        try:
+            res = await http_client.post(
+                f"{agent_server_url}/command", json=cmd.model_dump(), timeout=45.0
+            )
+        except Exception as e:
+            log_message(f"[!] Web extract request failed: {e}")
+            agent_state.status = "completed"
+            return
+
+    if res.status_code != 200:
+        log_message(f"[!] Web extract failed: HTTP {res.status_code}")
+        agent_state.status = "completed"
+        return
+
+    result = res.json().get("result", {})
+    text = result.get("text", "")
+    if not text:
+        log_message("[Web] No page text extracted; nothing to summarize.")
+        agent_state.status = "completed"
+        return
+
+    log_message(f"[Web] Extracted {len(text)} chars from {result.get('page_url', target)}. Summarizing via Gemini...")
+    web_prompt = web_intent.build_web_answer_prompt(goal, text)
+    mem_context = memory.recall_context(goal)
+    if mem_context:
+        web_prompt = mem_context + "\n\n" + web_prompt
+    resp = await asyncio.to_thread(
+        client.models.generate_content,
+        model='gemini-3-flash-preview',
+        contents=web_prompt,
+    )
+    answer = resp.text or ""
+    log_message(f"[Web] Answer:\n{answer}")
+    agent_state.nudge_message = answer[:400]
+    bq_save_memory("action_log", f"Web task answered: '{goal}'.")
+    agent_state.status = "completed"
+
+
+async def handle_mcp_task(goal: str, capability: Optional[str], client):
+    """
+    Dispatch an API-backed task directly (no visual loop). MCP always wins for
+    Docs/Sheets/Gmail/Calendar (see ROUTING.md). Only Gmail requires confirmation.
+    """
+    log_message(f"[MCP] Handling '{capability}' task via API. Goal: '{goal}'")
+    try:
+        if capability == "gmail":
+            await _handle_gmail(goal, client)
+        elif capability == "calendar":
+            await _handle_calendar(goal)
+        elif capability == "docs":
+            await _handle_docs(goal, client)
+        elif capability == "sheets":
+            await _handle_sheets(goal)
+        else:
+            log_message(f"[MCP] Unknown capability '{capability}'; nothing to do.")
+    except Exception as e:
+        log_message(f"[!] MCP task failure: {e}")
+    agent_state.status = "completed"
+
+
 async def run_computer_use_loop(goal: str):
     """
     Core Gemini Vision-to-Action loop executing on Port 8420.
@@ -246,7 +405,8 @@ async def run_computer_use_loop(goal: str):
     AND high-performance Browser Use (Playwright remote CDP browser automation).
     """
     log_message(f"[Loop] Initiating hybrid Autonomous loop for goal: '{goal}'")
-    
+    memory.save("interaction", f"User goal: {goal}")
+
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         log_message("[!] Error: GOOGLE_API_KEY is missing from .env. Terminating loop.")
@@ -289,6 +449,14 @@ async def run_computer_use_loop(goal: str):
                 log_message(f"[BigQuery] Recalled prior preference: '{client_pref}'")
                 break
                 
+    # MCP fast-path (ROUTING.md): API-backed goals (Docs/Sheets/Gmail/Calendar) are
+    # handled directly and never touch the visual loop. MCP always wins.
+    decision = routing.classify_goal(goal)
+    if decision.route == "mcp":
+        log_message(f"[Router] Goal routed to MCP/{decision.mcp_capability} ({decision.reason}). Bypassing visual loop.")
+        await handle_mcp_task(goal, decision.mcp_capability, client)
+        return
+
     if "email" in goal.lower() or "draft" in goal.lower():
         if not client_pref:
             log_message("[Confidence Gate] Missing client details. Triggering user nudge feedback loop...")
@@ -311,7 +479,7 @@ async def run_computer_use_loop(goal: str):
     # Programmatic Scraper Shortcut Pathway (GATE 5 & 6)
     # If the goal is programmatic scraping, bypass the visual desktop screenshot loop 
     # to prevent context confusion from visible HUD logs or instructions on screen.
-    is_programmatic = any(kw in goal.lower() for kw in ["summarize", "scrape", "reddit", "machine learning"])
+    is_programmatic = routing.is_reddit_scrape_shortcut(goal)
     if is_programmatic:
         log_message("[Loop] Detected programmatic scraper goal. Executing fast browser scrape directly...")
         async with httpx.AsyncClient() as http_client:
@@ -400,6 +568,13 @@ async def run_computer_use_loop(goal: str):
                 log_message(f"[!] Programmatic scraper failure: {e}")
                 log_message("Falling back to visual computer use loop...")
 
+    # General web fast-path (ROUTING.md Tier 2): any web/DOM goal that isn't the
+    # specialized Reddit shortcut is answered by extract -> summarize, no visual loop.
+    if decision.route == "browser":
+        await handle_web_task(goal, client, agent_server_url)
+        return
+
+    loop_memory_context = memory.recall_context(goal)
     max_steps = 15
     async with httpx.AsyncClient() as http_client:
         for step in range(1, max_steps + 1):
@@ -416,15 +591,18 @@ async def run_computer_use_loop(goal: str):
                 status_res = await http_client.get(f"{agent_server_url}/")
                 if status_res.status_code == 200:
                     status_data = status_res.json()
-                    if not status_data.get("active_console", True):
-                        # Detect if the goal is a web/browser automation task
-                        is_web_task = any(kw in goal.lower() for kw in [
-                            "search", "google", "browser", "website", "url", "lookup", 
-                            "scrape", "reddit", "machine learning", "docs", "sheets", "email", "gmail", "inbox"
-                        ])
-                        
-                        if is_web_task:
-                            log_message("[Failsafe] Profile B is in the background. Since this is a web task, running headlessly via Chrome CDP.")
+                    # FAIL CLOSED: missing/unknown active_console is treated as background
+                    # so desktop computer_use is never attempted on an unverified session.
+                    if not status_data.get("active_console", False):
+                        # Single classifier decides routing (ROUTING.md §5). Desktop route
+                        # needs the foreground console -> nudge. mcp/browser routes are
+                        # profile-independent -> proceed headlessly without switching.
+                        decision = routing.classify_goal(goal)
+                        if decision.is_background_safe:
+                            # TODO(Phase 2): when route == "mcp", dispatch directly to the
+                            # MCP handler instead of hinting the browser. For now both
+                            # background-safe routes proceed via the headless browser hint.
+                            log_message(f"[Router] Profile B is background; '{decision.route}' route is background-safe ({decision.reason}). Proceeding headlessly.")
                             background_headless_hint = True
                         else:
                             log_message("[Failsafe Active] Profile B is in the background! Proactively pausing visual computer use.")
@@ -476,7 +654,10 @@ async def run_computer_use_loop(goal: str):
                     "and specifying Chrome CDP action arguments (navigate, click, type, scroll) in args. "
                     "Do NOT try to click or type globally on the desktop screen. Proceed headlessly."
                 )
-            
+
+            if loop_memory_context:
+                system_prompt += "\n\n" + loop_memory_context
+
             log_message(f"[Step {step}] Analyzing screen via Gemini GenAI...")
             try:
                 response = await asyncio.to_thread(

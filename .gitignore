@@ -60,6 +60,7 @@ doppelganger_execution.log
 Doppelganger_Activity_Log.csv
 Doppelganger_Mail_Drafts.txt
 Doppelganger_Research_Notes.md
+doppelganger_memory.jsonl
 doppelganger_dataset/
 *.log
 

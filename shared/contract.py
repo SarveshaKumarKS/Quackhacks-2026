@@ -7,15 +7,19 @@ class CommandModel(BaseModel):
     Tells the agent-server which action to execute natively.
     """
     type: Literal["action"] = "action"
-    path: Literal["computer_use", "browser_use", "noop"] = Field(
-        ..., 
-        description="The routing pathway for this action."
+    path: Literal["computer_use", "browser_use", "mcp", "noop"] = Field(
+        ...,
+        description="The routing pathway for this action. See ROUTING.md: "
+                    "mcp (API, first choice) > browser_use (headless web) > computer_use (desktop, last resort)."
     )
     action: Literal[
-        "click", "type", "key", "read", "navigate", "scroll", "hover", "screenshot", "poll_mail"
+        # computer_use / browser_use verbs
+        "click", "type", "key", "read", "extract", "navigate", "scroll", "hover", "screenshot", "poll_mail",
+        # mcp verbs (Google Docs / Sheets / Gmail / Calendar)
+        "send_email", "append_doc", "append_sheet", "read_calendar",
     ] = Field(
         ...,
-        description="The action verb to execute on the background screen or browser session."
+        description="The action verb to execute on the desktop, browser session, or MCP/API surface."
     )
     args: Dict[str, Any] = Field(
         default_factory=dict,
