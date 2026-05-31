@@ -4,11 +4,12 @@ import Speech
 
 /// Real speech I/O for the notch UI:
 ///   - Input  (STT): live microphone transcription via SFSpeechRecognizer + AVAudioEngine.
-///   - Output (TTS): spoken nudges via AVSpeechSynthesizer (native, offline, no API key).
+///   - Output (TTS): spoken nudges via ElevenLabs when an API key is configured in
+///     orchestrator/.env, otherwise the native AVSpeechSynthesizer. ElevenLabs failures
+///     (missing key, bad voice, network) fall back to the native voice automatically.
 ///
-/// Everything degrades gracefully: if mic/speech permission is denied or the
-/// recognizer is unavailable, recording becomes a safe no-op (the user can still type),
-/// and we never crash. macOS has no AVAudioSession, so none is configured here.
+/// Everything degrades gracefully and never crashes. macOS has no AVAudioSession,
+/// so none is configured.
 class SpeechManager: ObservableObject {
     static let shared = SpeechManager()
 
@@ -18,6 +19,11 @@ class SpeechManager: ObservableObject {
 
     // --- Output (TTS) ---
     private let synthesizer = AVSpeechSynthesizer()
+    private var audioPlayer: AVAudioPlayer?
+    private let elevenLabsKey: String?
+    private let elevenLabsVoice: String
+    private let defaultVoiceId = "21m00Tcm4TlvDq8ikWAM"  // ElevenLabs "Rachel"
+    private var resolvedVoiceId: String?
 
     // --- Input (STT) ---
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -26,10 +32,48 @@ class SpeechManager: ObservableObject {
     private var task: SFSpeechRecognitionTask?
 
     init() {
+        let env = SpeechManager.loadEnv()
+        let key = env["ELEVENLABS_API_KEY"] ?? ""
+        // Treat empty / template placeholder as "not configured" -> native voice.
+        self.elevenLabsKey = (key.isEmpty || key.contains("your-elevenlabs")) ? nil : key
+        let voice = env["ELEVENLABS_VOICE_ID"] ?? ""
+        self.elevenLabsVoice = voice.isEmpty ? "Rachel" : voice
         requestPermissions()
     }
 
-    /// Ask for speech-recognition and microphone access up front (one-time TCC prompt).
+    // MARK: - .env loading (orchestrator/.env on Profile A)
+
+    private static func loadEnv() -> [String: String] {
+        let fm = FileManager.default
+        let cwd = fm.currentDirectoryPath
+        let candidates = [
+            cwd + "/orchestrator/.env",
+            cwd + "/../orchestrator/.env",
+            cwd + "/../../orchestrator/.env",
+        ]
+        for path in candidates {
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            var dict: [String: String] = [:]
+            for rawLine in content.split(separator: "\n") {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.isEmpty || line.hasPrefix("#") { continue }
+                guard let eq = line.firstIndex(of: "=") else { continue }
+                let k = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
+                var v = String(line[line.index(after: eq)...])
+                if let hash = v.range(of: " #") { v = String(v[..<hash.lowerBound]) }
+                v = v.trimmingCharacters(in: .whitespaces)
+                if (v.hasPrefix("\"") && v.hasSuffix("\"")) || (v.hasPrefix("'") && v.hasSuffix("'")), v.count >= 2 {
+                    v = String(v.dropFirst().dropLast())
+                }
+                dict[k] = v
+            }
+            return dict
+        }
+        return [:]
+    }
+
+    // MARK: - Permissions
+
     func requestPermissions() {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
@@ -52,7 +96,6 @@ class SpeechManager: ObservableObject {
             return
         }
 
-        // Reset any prior session.
         task?.cancel()
         task = nil
 
@@ -107,20 +150,102 @@ class SpeechManager: ObservableObject {
 
     // MARK: - Text to speech (spoken nudges)
 
-    /// Speak a short, natural-sounding nudge. Kept brief so nudges stay minimal.
+    /// Speak a short, natural-sounding nudge. ElevenLabs if configured, else native.
     func speak(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        // Cap spoken length so long drafts/answers don't monologue.
         let toSpeak = String(trimmed.prefix(240))
 
-        if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
+        // Stop any in-flight speech first.
+        audioPlayer?.stop()
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+
+        if let key = elevenLabsKey {
+            speakWithElevenLabs(toSpeak, key: key)
+        } else {
+            speakNative(toSpeak)
         }
-        let utterance = AVSpeechUtterance(string: toSpeak)
+    }
+
+    private func speakNative(_ text: String) {
+        let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synthesizer.speak(utterance)
+    }
+
+    private func speakWithElevenLabs(_ text: String, key: String) {
+        resolveVoiceId(elevenLabsVoice, key: key) { [weak self] voiceId in
+            guard let self = self else { return }
+            guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceId)") else {
+                DispatchQueue.main.async { self.speakNative(text) }
+                return
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue(key, forHTTPHeaderField: "xi-api-key")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+            let body: [String: Any] = [
+                "text": text,
+                "model_id": "eleven_turbo_v2_5",
+                "voice_settings": ["stability": 0.5, "similarity_boost": 0.75],
+            ]
+            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            URLSession.shared.dataTask(with: req) { [weak self] data, response, _ in
+                guard let self = self else { return }
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                if code == 200, let data = data, !data.isEmpty {
+                    DispatchQueue.main.async { self.playAudio(data, fallbackText: text) }
+                } else {
+                    print("[Speech] ElevenLabs TTS failed (HTTP \(code)); falling back to native voice.")
+                    DispatchQueue.main.async { self.speakNative(text) }
+                }
+            }.resume()
+        }
+    }
+
+    /// Resolve a configured voice (an ID, or a name like "Jarvis") to an ElevenLabs voice_id.
+    private func resolveVoiceId(_ configured: String, key: String, completion: @escaping (String) -> Void) {
+        if let cached = resolvedVoiceId { completion(cached); return }
+        // Already looks like an ElevenLabs ID (20-char alphanumeric)?
+        if configured.count >= 18 && configured.allSatisfy({ $0.isLetter || $0.isNumber }) {
+            resolvedVoiceId = configured
+            completion(configured)
+            return
+        }
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/voices") else {
+            completion(defaultVoiceId); return
+        }
+        var req = URLRequest(url: url)
+        req.setValue(key, forHTTPHeaderField: "xi-api-key")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            var id = self.defaultVoiceId
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let voices = json["voices"] as? [[String: Any]],
+               let match = voices.first(where: {
+                   ($0["name"] as? String)?.lowercased() == configured.lowercased()
+               }),
+               let vid = match["voice_id"] as? String {
+                id = vid
+            }
+            self.resolvedVoiceId = id
+            completion(id)
+        }.resume()
+    }
+
+    private func playAudio(_ data: Data, fallbackText: String) {
+        do {
+            let player = try AVAudioPlayer(data: data)
+            self.audioPlayer = player  // strong reference so it isn't deallocated mid-playback
+            player.prepareToPlay()
+            player.play()
+        } catch {
+            print("[Speech] Audio playback failed: \(error); falling back to native voice.")
+            speakNative(fallbackText)
+        }
     }
 }
