@@ -806,23 +806,36 @@ async def plan_tasks(goal: str, client) -> list:
 
 
 async def handle_mail_response(response: str, email: dict, client):
-    """Act on the user's reply to a new-email nudge: dismiss, or draft a reply."""
+    """Act on the user's reply to a new-email nudge: dismiss, or draft a CALENDAR-AWARE
+    reply (actually checks the calendar and resolves scheduling conflicts itself)."""
     r = (response or "").strip()
     if not r or mcp_intent.is_negative(r) or r.lower() in ("ignore", "dismiss", "skip", "later"):
         log_message(f"[Mail] Dismissed email from {email.get('sender')}.")
         return
     body = await asyncio.to_thread(mcp_google.get_email_body, email.get("id", ""))
+    # Calendar-aware: fetch events up front so the reply can resolve conflicts on its own.
+    events = await asyncio.to_thread(mcp_google.check_google_calendar, 15)
+    cal = mcp_intent.format_calendar_events(events)
+    today = datetime.datetime.now().strftime("%A, %Y-%m-%d %H:%M")
     if mcp_intent.is_affirmative(r):
-        instruction = "Write a brief, polite reply."
+        instruction = "Write an appropriate reply on my behalf."
     else:
-        instruction = f"Specific instruction from me for the reply: {r}"
+        instruction = f"My instruction for the reply: {r}"
     subject = email.get("subject", "")
     reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     goal = (
-        f"Draft a reply to {email.get('sender')} <{email.get('sender_email')}> about the email "
-        f"subject '{subject}'. {instruction} Use subject '{reply_subject}'.\n\n"
-        f"Their message:\n{body or '(body unavailable)'}"
+        f"Draft a reply to {email.get('sender')} <{email.get('sender_email')}> about subject "
+        f"'{subject}'. {instruction} Use subject '{reply_subject}'.\n\n"
+        f"Today is {today}.\n"
+        f"Their message:\n{body or '(body unavailable)'}\n\n"
+        f"My calendar (upcoming events):\n{cal}\n\n"
+        "SCHEDULING RULES: If their message proposes a meeting/activity at a specific date & "
+        "time, compare it against my calendar above. If I ALREADY have an event overlapping that "
+        "time, write a POLITE DECLINE that briefly cites a prior commitment (do NOT reveal private "
+        "event details). If I am free then, you may accept. Make the decision NOW from the actual "
+        "calendar — never write 'let me check my calendar', and never defer the decision."
     )
+    log_message(f"[Mail] Drafting calendar-aware reply (calendar has {len(events)} event(s)).")
     await _handle_gmail(goal, client, recipient=email.get("sender_email", ""))
 
 
