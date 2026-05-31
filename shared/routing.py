@@ -46,7 +46,9 @@ _MCP_KEYWORDS: dict[MCPCapability, tuple[str, ...]] = {
     "docs": ("google doc", "google docs", "the doc", "a document",
              "research doc", "notes doc", "write up", "append to doc"),
     "sheets": ("google sheet", "google sheets", "spreadsheet", "the sheet",
-               "log row", "activity log", "track in sheet", "tracker"),
+               "log row", "activity log", "activity sheet", "activity tracker",
+               "tracking sheet", "track in sheet", "tracker",
+               "log the completion", "log this run"),
 }
 
 _BROWSER_KEYWORDS: tuple[str, ...] = (

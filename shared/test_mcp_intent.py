@@ -33,6 +33,12 @@ class TestMcpIntent(unittest.TestCase):
         self.assertFalse(mcp_intent.is_affirmative(""))
         self.assertFalse(mcp_intent.is_negative(""))
 
+    def test_standalone_confirmation_detection(self):
+        for t in ("yes", "ok", "send it", "no", "cancel", "do not send"):
+            self.assertTrue(mcp_intent.is_standalone_confirmation(t), t)
+        self.assertFalse(mcp_intent.is_standalone_confirmation("yes, draft an email to Sam"))
+        self.assertFalse(mcp_intent.is_standalone_confirmation("open calculator"))
+
     def test_email_prompt_contains_goal_and_revision(self):
         p = mcp_intent.build_email_draft_prompt("email Sam about lunch", "sam@x.com", "make it formal")
         self.assertIn("email Sam about lunch", p)

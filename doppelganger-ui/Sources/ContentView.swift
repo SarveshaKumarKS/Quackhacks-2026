@@ -11,6 +11,7 @@ struct OrchestratorState: Codable {
     let nudge_message: String
     let logs: [String]
     let step_count: Int
+    let pending_prompt_id: Int?
 }
 
 struct ContentView: View {
@@ -25,7 +26,9 @@ struct ContentView: View {
     @State private var timer: Timer? = nil
     @State private var logs: [String] = []
     @State private var stepCount: Int = 0
-    @State private var lastSpokenNudge: String = ""
+    @State private var pendingPromptId: Int? = nil
+    @State private var isApprovalSubmitting: Bool = false
+    @State private var lastSpokenMessageKey: String = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -105,21 +108,27 @@ struct ContentView: View {
                             
                             Spacer()
                             
-                            // Yes / Approve Button — sends an affirmative so the
-                            // orchestrator's confirm-before-send gate proceeds.
-                            Button(action: {
-                                self.promptText = "yes"
-                                sendInstruction()
-                            }) {
-                                Text("Approve")
-                                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(Color.orange.opacity(0.8))
-                                    .cornerRadius(4)
+                            if status == .waitingForUser {
+                                // Yes / Approve Button — sends an affirmative so the
+                                // orchestrator's confirm-before-send gate proceeds.
+                                Button(action: {
+                                    guard !isApprovalSubmitting else { return }
+                                    self.promptText = "yes"
+                                    self.isApprovalSubmitting = true
+                                    self.nudgeMessage = ""
+                                    sendInstruction()
+                                }) {
+                                    Text(isApprovalSubmitting ? "Sent" : "Approve")
+                                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(Color.orange.opacity(isApprovalSubmitting ? 0.35 : 0.8))
+                                        .cornerRadius(4)
+                                }
+                                .disabled(isApprovalSubmitting)
+                                .buttonStyle(PlainButtonStyle())
                             }
-                            .buttonStyle(PlainButtonStyle())
                         }
                         .padding(.all, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -325,6 +334,7 @@ struct ContentView: View {
                     self.nudgeMessage = newNudge
                     self.logs = stateResponse.logs
                     self.stepCount = stateResponse.step_count
+                    let newPromptId = stateResponse.pending_prompt_id
 
                     switch stateResponse.status {
                     case "working":
@@ -335,17 +345,25 @@ struct ContentView: View {
                         self.status = .idle
                     }
 
-                    // Minimal voice policy: speak a nudge ONCE, and only while waiting on
-                    // the user (a confirmation or a block). Never on working/idle, never
-                    // repeated on each 1s poll. Reset when the nudge clears so a later
-                    // identical nudge can speak again.
-                    if stateResponse.status == "waiting_for_user",
+                    if stateResponse.status != "waiting_for_user" {
+                        self.isApprovalSubmitting = false
+                    } else if newPromptId != self.pendingPromptId {
+                        self.isApprovalSubmitting = false
+                    }
+                    self.pendingPromptId = newPromptId
+
+                    // Speak user prompts and completion messages once. This uses
+                    // ElevenLabs when configured, otherwise native macOS speech.
+                    let shouldSpeak = stateResponse.status == "waiting_for_user" ||
+                        stateResponse.status == "completed"
+                    let voiceKey = "\(stateResponse.status):\(newNudge)"
+                    if shouldSpeak,
                        !newNudge.isEmpty,
-                       newNudge != self.lastSpokenNudge {
+                       voiceKey != self.lastSpokenMessageKey {
                         self.speechManager.speak(newNudge)
-                        self.lastSpokenNudge = newNudge
+                        self.lastSpokenMessageKey = voiceKey
                     } else if newNudge.isEmpty {
-                        self.lastSpokenNudge = ""
+                        self.lastSpokenMessageKey = ""
                     }
                 }
             } catch {
@@ -358,6 +376,7 @@ struct ContentView: View {
         guard !promptText.isEmpty else { return }
         
         let instruction = promptText
+        let responsePromptId = status == .waitingForUser ? pendingPromptId : nil
         print("[Notch UI] User submitted instruction: \(instruction)")
         
         // Clear input bar
@@ -372,7 +391,10 @@ struct ContentView: View {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let body: [String: String] = ["goal": instruction]
+        var body: [String: Any] = ["goal": instruction]
+        if let responsePromptId = responsePromptId {
+            body["prompt_id"] = responsePromptId
+        }
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         } catch {

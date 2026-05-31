@@ -111,6 +111,7 @@ app = FastAPI(title="Doppelgänger OS — Orchestrator Backend", version="2.1")
 # Event-driven resume primitives for active user loop feedback
 resume_event = asyncio.Event()
 user_response_value = ""
+MAX_DESKTOP_NUDGES = 2
 
 class AgentState:
     def __init__(self):
@@ -120,11 +121,14 @@ class AgentState:
         self.current_goal = ""       # Current objective
         self.active_task = None      # Asyncio task reference
         self.step_count = 0
+        self.pending_prompt_id = 0    # Incremented for each user prompt/nudge
+        self.desktop_nudge_count = 0  # Per-task Profile B foreground nudges
 
 agent_state = AgentState()
 
 class InstructionRequest(BaseModel):
     goal: str
+    prompt_id: Optional[int] = None
 
 @app.get("/")
 async def root():
@@ -141,35 +145,51 @@ async def get_state():
         "status": agent_state.status,
         "nudge_message": agent_state.nudge_message,
         "logs": agent_state.logs,
-        "step_count": agent_state.step_count
+        "step_count": agent_state.step_count,
+        "pending_prompt_id": agent_state.pending_prompt_id
     }
 
 @app.post("/instruction")
 async def receive_instruction(request: InstructionRequest, background_tasks: BackgroundTasks):
     global user_response_value
+    goal = (request.goal or "").strip()
     
     if agent_state.status == "waiting_for_user":
+        if request.prompt_id is not None and request.prompt_id != agent_state.pending_prompt_id:
+            log_message(
+                f"[User Input] Ignored stale response for prompt_id={request.prompt_id}; "
+                f"current prompt_id={agent_state.pending_prompt_id}."
+            )
+            return {"status": "ignored", "reason": "stale prompt response"}
         # User responded to a Notch Pill nudge
-        user_response_value = request.goal
+        user_response_value = goal
         log_message(f"[User Input] Received response from Notch UI: '{user_response_value}'")
         agent_state.status = "working"
         resume_event.set()
-        return {"status": "resumed", "value": request.goal}
+        return {"status": "resumed", "value": goal, "prompt_id": agent_state.pending_prompt_id}
         
     if agent_state.status == "working":
         raise HTTPException(status_code=400, detail="Agent is already busy executing a task")
+
+    if not goal:
+        return {"status": "ignored", "reason": "empty instruction"}
+
+    if mcp_intent.is_standalone_confirmation(goal):
+        log_message(f"[User Input] Ignored stray confirmation with no pending prompt: '{goal}'")
+        return {"status": "ignored", "reason": "confirmation token without pending prompt"}
         
     agent_state.status = "working"
-    agent_state.current_goal = request.goal
+    agent_state.current_goal = goal
     agent_state.logs = []
     agent_state.step_count = 0
     agent_state.nudge_message = ""
+    agent_state.desktop_nudge_count = 0
     resume_event.clear()
     
-    task = asyncio.create_task(run_computer_use_loop(request.goal))
+    task = asyncio.create_task(run_computer_use_loop(goal))
     agent_state.active_task = task
     
-    return {"status": "started", "goal": request.goal}
+    return {"status": "started", "goal": goal}
 
 @app.post("/observation")
 async def receive_observation(observation: ObservationModel):
@@ -179,9 +199,10 @@ async def receive_observation(observation: ObservationModel):
 @app.post("/mail")
 async def receive_mail_notification(mail: MailNotificationModel):
     log_message(f"[Inbox] New email detected from {mail.latest_sender}: '{mail.latest_subject}'")
-    agent_state.nudge_message = f"New Email from {mail.latest_sender}: '{mail.latest_subject}'. Want me to handle it?"
-    agent_state.status = "waiting_for_user"
-    return {"status": "nudge_triggered"}
+    prompt_id = _set_waiting_prompt(
+        f"New Email from {mail.latest_sender}: '{mail.latest_subject}'. Want me to handle it?"
+    )
+    return {"status": "nudge_triggered", "prompt_id": prompt_id}
 
 def log_message(text: str):
     print(text)
@@ -194,20 +215,50 @@ def log_message(text: str):
     except Exception as e:
         pass
 
+def _set_waiting_prompt(prompt_text: str) -> int:
+    """Surface a user prompt and return the prompt id used for stale-response guards."""
+    agent_state.pending_prompt_id += 1
+    agent_state.nudge_message = prompt_text
+    agent_state.status = "waiting_for_user"
+    return agent_state.pending_prompt_id
+
+def _complete_with_message(message: str):
+    agent_state.nudge_message = message
+    agent_state.status = "completed"
+
 async def _await_user_reply(prompt_text: str) -> str:
     """
     Park the loop, surface a nudge in the Notch UI, and block until the user
     replies via POST /instruction. Returns the user's reply text.
     """
     global user_response_value
-    agent_state.nudge_message = prompt_text
-    agent_state.status = "waiting_for_user"
+    _set_waiting_prompt(prompt_text)
     resume_event.clear()
     await resume_event.wait()
     reply = user_response_value
     agent_state.status = "working"
     agent_state.nudge_message = ""
     return reply
+
+
+async def _pause_for_profile_b_foreground() -> bool:
+    """Ask the user to switch to Profile B, but cap nudges to avoid spam loops."""
+    agent_state.desktop_nudge_count += 1
+    if agent_state.desktop_nudge_count > MAX_DESKTOP_NUDGES:
+        msg = (
+            "Desktop control is blocked because Profile B is backgrounded. "
+            "Use a browser/API task or switch to Profile B and retry."
+        )
+        log_message(f"[Failsafe Active] {msg}")
+        _complete_with_message(msg)
+        return False
+    _set_waiting_prompt("Please fast-user-switch to Profile B to allow visual tasks!")
+    resume_event.clear()
+    await resume_event.wait()
+    agent_state.nudge_message = ""
+    agent_state.status = "working"
+    log_message("[Loop] Resuming visual computer use loop after user response.")
+    return True
 
 
 def _draft_email(client, goal: str, recipient_hint: str = "", revision: str = "",
@@ -394,8 +445,9 @@ async def handle_web_task(goal: str, client, agent_server_url: str):
     """Single-task entry point: run web_answer and surface the result in the UI."""
     answer = await web_answer(goal, client, agent_server_url)
     if answer:
-        agent_state.nudge_message = answer[:400]
-    agent_state.status = "completed"
+        _complete_with_message("Done. " + answer[:360])
+    else:
+        _complete_with_message("Done, but I could not extract enough web content to answer cleanly.")
 
 
 async def handle_mcp_task(goal: str, capability: Optional[str], client):
@@ -406,18 +458,20 @@ async def handle_mcp_task(goal: str, capability: Optional[str], client):
     log_message(f"[MCP] Handling '{capability}' task via API. Goal: '{goal}'")
     try:
         if capability == "gmail":
-            await _handle_gmail(goal, client)
+            result = await _handle_gmail(goal, client)
         elif capability == "calendar":
-            await _handle_calendar(goal)
+            result = await _handle_calendar(goal)
         elif capability == "docs":
-            await _handle_docs(goal, client)
+            result = await _handle_docs(goal, client)
         elif capability == "sheets":
-            await _handle_sheets(goal)
+            result = await _handle_sheets(goal)
         else:
             log_message(f"[MCP] Unknown capability '{capability}'; nothing to do.")
+            result = "No matching MCP capability."
     except Exception as e:
         log_message(f"[!] MCP task failure: {e}")
-    agent_state.status = "completed"
+        result = f"MCP task failed: {e}"
+    _complete_with_message(f"Done. {result}")
 
 
 async def reddit_summary(client, agent_server_url: str) -> str:
@@ -461,12 +515,9 @@ async def _desktop_substep_loop(task: str, client, agent_server_url: str, max_st
             except Exception:
                 active = False
             if not active:
-                agent_state.nudge_message = "Please fast-user-switch to Profile B for the desktop step!"
-                agent_state.status = "waiting_for_user"
-                resume_event.clear()
-                await resume_event.wait()
-                agent_state.nudge_message = ""
-                agent_state.status = "working"
+                ok = await _pause_for_profile_b_foreground()
+                if not ok:
+                    return "Desktop sub-task blocked because Profile B is backgrounded."
 
             try:
                 frame = await http_client.get(f"{agent_server_url}/frame.jpg")
@@ -628,6 +679,14 @@ async def execute_plan_step(task: str, client, agent_server_url: str, context: s
         if cap == "sheets":
             return await _handle_sheets(task, extra_context=context)
         return ""
+    if planner.should_use_context_only(task, context):
+        log_message(f"[Planner] Transforming prior context for step '{task}' (no new browser/search).")
+        resp = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-3-flash-preview',
+            contents=planner.build_context_transform_prompt(task, context),
+        )
+        return resp.text or ""
     if decision.route == "browser":
         if routing.is_reddit_scrape_shortcut(task):
             return await reddit_summary(client, agent_server_url)
@@ -658,8 +717,7 @@ async def run_task_plan(steps, client, agent_server_url: str):
             context += f"\n\n[Result of step {idx} — {task}]:\n{out}"
             memory.save("action_log", f"Plan step {idx} ({task}) -> {out[:120]}")
     log_message("[Planner] Task plan complete.")
-    agent_state.nudge_message = "All steps complete."
-    agent_state.status = "completed"
+    _complete_with_message("All steps complete.")
 
 
 async def plan_tasks(goal: str, client) -> list:
@@ -769,8 +827,7 @@ async def run_computer_use_loop(goal: str):
     if "email" in goal.lower() or "draft" in goal.lower():
         if not client_pref:
             log_message("[Confidence Gate] Missing client details. Triggering user nudge feedback loop...")
-            agent_state.nudge_message = "Need client details (Name/Email) to draft email."
-            agent_state.status = "waiting_for_user"
+            _set_waiting_prompt("Need client details (Name/Email) to draft email.")
             resume_event.clear()
             
             # Asynchronously block the execution loop until user replies in SwiftUI
@@ -871,7 +928,7 @@ async def run_computer_use_loop(goal: str):
                         
                 log_message("[x] Scraping, summarizing, and Cloud Doc/Sheet writing completed!")
                 log_message("[Loop] Completed tasks execution pipeline.")
-                agent_state.status = "completed"
+                _complete_with_message("Done. Scraping, summary, and document logging completed.")
                 return
             except Exception as e:
                 log_message(f"[!] Programmatic scraper failure: {e}")
@@ -888,8 +945,8 @@ async def run_computer_use_loop(goal: str):
     app = routing.parse_app_launch(goal)
     if decision.route == "desktop" and app:
         log_message(f"[Router] App-launch '{app}' via open_app (session-safe).")
-        await dispatch_open_app(app, agent_server_url)
-        agent_state.status = "completed"
+        result = await dispatch_open_app(app, agent_server_url)
+        _complete_with_message(f"Done. {result or f'Opened {app}.'}")
         return
 
     # In-app automation via session-safe AppleScript (pixels are fail-closed in the
@@ -897,8 +954,7 @@ async def run_computer_use_loop(goal: str):
     if decision.route == "desktop":
         out = await applescript_for_goal(goal, client, agent_server_url)
         if out is not None:
-            agent_state.nudge_message = (out or "")[:300]
-            agent_state.status = "completed"
+            _complete_with_message("Done. " + (out or "AppleScript action completed.")[:300])
             return
 
     loop_memory_context = memory.recall_context(goal)
@@ -934,15 +990,9 @@ async def run_computer_use_loop(goal: str):
                         else:
                             log_message("[Failsafe Active] Profile B is in the background! Proactively pausing visual computer use.")
                             log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
-                            
-                            agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
-                            agent_state.status = "waiting_for_user"
-                            resume_event.clear()
-                            
-                            await resume_event.wait()
-                            agent_state.nudge_message = ""
-                            agent_state.status = "working"
-                            log_message("[Loop] Resuming visual computer use loop after user response.")
+                            ok = await _pause_for_profile_b_foreground()
+                            if not ok:
+                                return
                             # Re-evaluate the step after user switches profiles
                             continue
             except Exception as se:
@@ -1174,15 +1224,9 @@ async def run_computer_use_loop(goal: str):
                     if screen_state == "background_lock":
                         log_message("[Failsafe Active] Profile B is in the background! Visual computer use is blocked.")
                         log_message("[Notch UI] Prompting user via Notch to switch to Profile B...")
-                        
-                        agent_state.nudge_message = "Please fast-user-switch to Profile B to allow visual tasks!"
-                        agent_state.status = "waiting_for_user"
-                        resume_event.clear()
-                        
-                        await resume_event.wait()
-                        agent_state.nudge_message = ""
-                        agent_state.status = "working"
-                        log_message("[Loop] Resuming visual computer use loop after user response.")
+                        ok = await _pause_for_profile_b_foreground()
+                        if not ok:
+                            return
                         continue
                         
                     log_message(f"[Executor] Command result: {res_data.get('result', {}).get('detail', 'done')}")
@@ -1193,7 +1237,7 @@ async def run_computer_use_loop(goal: str):
             await asyncio.sleep(2)
             
         log_message("[Loop] Completed tasks execution pipeline.")
-        agent_state.status = "completed"
+        _complete_with_message("Done. Task execution pipeline completed.")
 
 if __name__ == "__main__":
     import uvicorn

@@ -33,6 +33,16 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(d.route, "mcp")
         self.assertEqual(d.mcp_capability, "sheets")
 
+    def test_activity_sheet_routes_to_mcp_sheets(self):
+        for goal in (
+            "Log the completion of these tasks in the activity sheet.",
+            "Add this to the activity tracker.",
+            "Log this run in the tracking sheet.",
+        ):
+            d = classify_goal(goal)
+            self.assertEqual(d.route, "mcp", goal)
+            self.assertEqual(d.mcp_capability, "sheets", goal)
+
     def test_web_search_routes_to_browser(self):
         d = classify_goal("Search Google for the latest on Apple stock")
         self.assertEqual(d.route, "browser")

@@ -37,6 +37,18 @@ class TestPlanner(unittest.TestCase):
     def test_normalize_caps_length(self):
         self.assertEqual(len(planner.normalize_steps([str(i) for i in range(20)])), planner.MAX_STEPS)
 
+    def test_context_only_step_detection(self):
+        context = "[Result of step 1]: useful ML findings"
+        self.assertTrue(planner.should_use_context_only("Summarize the top 3 useful items identified.", context))
+        self.assertTrue(planner.should_use_context_only("Append the generated summary to the doc.", context))
+        self.assertFalse(planner.should_use_context_only("Search reddit for ML posts.", context))
+        self.assertFalse(planner.should_use_context_only("Summarize the top 3 useful items identified.", ""))
+
+    def test_context_transform_prompt_uses_prior_results(self):
+        prompt = planner.build_context_transform_prompt("Summarize the generated summary", "prior facts")
+        self.assertIn("prior facts", prompt)
+        self.assertIn("Do not browse", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,8 @@ _NEGATIVE_PHRASES = (
     "hold off", "don't", "do not",
 )
 
+_CONFIRMATION_ONLY_PHRASES = _AFFIRMATIVE_PHRASES + _NEGATIVE_PHRASES
+
 
 def _norm(text: str) -> str:
     return (text or "").strip().lower()
@@ -58,6 +60,25 @@ def is_affirmative(text: str) -> bool:
     if any(p in t for p in _AFFIRMATIVE_PHRASES):
         return True
     return bool(_words(t) & _AFFIRMATIVE)
+
+
+def is_standalone_confirmation(text: str) -> bool:
+    """
+    True for short approval/cancel replies that only make sense when there is an
+    active pending prompt. These should be ignored while idle/completed so a stale
+    "yes" cannot become a brand-new desktop task.
+    """
+    t = _norm(text)
+    if not t:
+        return False
+    if t in _CONFIRMATION_ONLY_PHRASES:
+        return True
+    words = _words(t)
+    if not words:
+        return False
+    if len(words) <= 3 and (words <= _AFFIRMATIVE or words <= _NEGATIVE):
+        return True
+    return False
 
 
 def build_email_draft_prompt(goal: str, recipient_hint: str = "", revision: str = "",
